@@ -53,7 +53,7 @@ flowchart TB
 
     subgraph gov["Governance: a policy cannot deploy itself"]
         log --> ope["IPS / SNIPS / DR<br/>cross-fitted ridge reward model<br/>bootstrap CIs, ESS"]
-        ope --> screen{"Eligible?<br/>DR lower > incumbent<br/>ESS >= min<br/>worst-case USD <= cap"}
+        ope --> screen{"Eligible?<br/>DR lower bound beats incumbent<br/>ESS at or above minimum<br/>worst-case USD within cap"}
         screen -->|no| refuse["Refused, and audited"]
         screen -->|yes| propose["propose"]
         propose --> approve["approve<br/>(a different principal)"]
