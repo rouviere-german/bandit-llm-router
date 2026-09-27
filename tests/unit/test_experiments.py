@@ -20,6 +20,7 @@ import numpy as np
 import pytest
 
 from bandit_llm_router.experiments import (
+    AdaptiveCoverage,
     DirectFeedbackChannel,
     PoisonedFeedbackChannel,
     expected_policy_cost,
@@ -474,16 +475,22 @@ def test_a_frozen_logger_drifts_less_than_one_that_keeps_learning(
     learner shows more, because it is genuinely moving. If these ever converged, the bench's "online
     learner" row would be a frozen log wearing a different label.
     """
-    common: dict[str, object] = {
-        "logger_factory": lambda: learner(environment, "linucb"),
-        "candidates": {"haiku": lambda env, _seed: static(env, "haiku")},
-        "n_logs": 2_000,
-        "seeds": (1, 2, 3),
-        "bootstrap": 0,
-        "block_sizes": (None,),
-    }
-    frozen = run_adaptive_coverage(environment, warmup=2_000, learn_while_logging=False, **common)  # type: ignore[arg-type]
-    online = run_adaptive_coverage(environment, warmup=0, learn_while_logging=True, **common)  # type: ignore[arg-type]
+
+    def sweep(*, warmup: int, learning: bool) -> list[AdaptiveCoverage]:
+        return run_adaptive_coverage(
+            environment,
+            logger_factory=lambda: learner(environment, "linucb"),
+            candidates={"haiku": lambda env, _seed: static(env, "haiku")},
+            n_logs=2_000,
+            seeds=(1, 2, 3),
+            warmup=warmup,
+            bootstrap=0,
+            block_sizes=(None,),
+            learn_while_logging=learning,
+        )
+
+    frozen = sweep(warmup=2_000, learning=False)
+    online = sweep(warmup=0, learning=True)
     assert frozen[0].logging_regime == "frozen"
     assert online[0].logging_regime == "online learner"
     assert online[0].logging_drift > 2.0 * frozen[0].logging_drift
