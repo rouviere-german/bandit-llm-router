@@ -26,20 +26,22 @@
     },
     "poisoning": {
       "defenses_no_better_than_none": 0.0,
+      "online_path_not_weaker_than_full": 0.0,
       "value_drop_clip_only": 0.0002,
       "value_drop_defended": 0.0001,
+      "value_drop_online_path": 0.0043,
       "value_drop_undefended": 0.2327
     },
     "route_decision_in_memory_budget": {
       "lost_decisions": 0.0,
-      "p95_us": 12129.4
+      "p95_us": 12232.6
     },
     "route_decision_shared_budget": {
       "lost_decisions": 0.0,
-      "p95_us": 34519.3
+      "p95_us": 31513.7
     }
   },
-  "seconds": 151.5,
+  "seconds": 151.2,
   "tables": {
     "adaptation": [
       {
@@ -87,10 +89,16 @@
         "value_drop": 0.0002
       },
       {
-        "defenses": "full",
+        "defenses": "full aggregation (stored reward)",
         "feedback": "10% adversarial",
         "mean_decision_value": 0.6494,
         "value_drop": 0.0001
+      },
+      {
+        "defenses": "online posterior (first report, clipped)",
+        "feedback": "10% adversarial",
+        "mean_decision_value": 0.6452,
+        "value_drop": 0.0043
       }
     ],
     "service": [
@@ -102,9 +110,9 @@
         ],
         "budget guard": "shared budget file",
         "decisions_logged": 2000,
-        "p50_us": 25347.6,
-        "p95_us": 34519.3,
-        "p99_us": 47807.3,
+        "p50_us": 24817.0,
+        "p95_us": 31513.7,
+        "p99_us": 48669.3,
         "requests": 2000
       },
       {
@@ -115,9 +123,9 @@
         ],
         "budget guard": "in-memory budget guard",
         "decisions_logged": 2000,
-        "p50_us": 6091.8,
-        "p95_us": 12129.4,
-        "p99_us": 29459.1,
+        "p50_us": 5999.6,
+        "p95_us": 12232.6,
+        "p99_us": 30499.4,
         "requests": 2000
       }
     ]

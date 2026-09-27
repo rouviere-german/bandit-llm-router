@@ -1,5 +1,24 @@
 {
   "config": {
+    "adaptive_block_size": 250,
+    "adaptive_n_logs": 8000,
+    "adaptive_seeds": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12,
+      13,
+      14,
+      15
+    ],
     "bootstrap": 300,
     "environment_digest": "e24ada0ddfb979aa53fa87601556d415d3d610d9f59d56b61db88d2b5bf35be0",
     "n_logs": 40000,
@@ -32,6 +51,33 @@
     "python": "3.12.14"
   },
   "results": {
+    "adaptive_frozen_block250": {
+      "abs_bias": 0.0004,
+      "coverage_gap": 0.0167,
+      "coverage_shortfall": 0.0,
+      "rmse": 0.0021
+    },
+    "adaptive_frozen_rows": {
+      "abs_bias": 0.0004,
+      "coverage_gap": 0.0167,
+      "coverage_shortfall": 0.0,
+      "rmse": 0.0021
+    },
+    "adaptive_online_learner_block250": {
+      "abs_bias": 0.0004,
+      "coverage_gap": 0.0167,
+      "coverage_shortfall": 0.0,
+      "rmse": 0.002
+    },
+    "adaptive_online_learner_rows": {
+      "abs_bias": 0.0004,
+      "coverage_gap": 0.0167,
+      "coverage_shortfall": 0.0,
+      "rmse": 0.002
+    },
+    "adaptive_setup": {
+      "online_log_barely_moved": 0.0
+    },
     "floor_0.01_dr": {
       "abs_bias": 0.0003,
       "coverage_gap": 0.0333,
@@ -75,7 +121,7 @@
       "rejection_shortfall": 0.0
     }
   },
-  "seconds": 153.7,
+  "seconds": 204.8,
   "tables": {
     "accuracy": [
       {
@@ -130,6 +176,52 @@
         "logging_floor": "floor_0.01",
         "mean_ess": 9857.2,
         "rmse": 0.0011,
+        "trials": 60
+      }
+    ],
+    "adaptive_coverage": [
+      {
+        "arm-share drift": 0.023,
+        "bias": 0.0004,
+        "bootstrap": "rows",
+        "dr coverage_95": 0.967,
+        "logged rows": 8000,
+        "logging policy": "frozen",
+        "mean CI width": 0.0115,
+        "rmse": 0.0021,
+        "trials": 60
+      },
+      {
+        "arm-share drift": 0.023,
+        "bias": 0.0004,
+        "bootstrap": "blocks of 250",
+        "dr coverage_95": 0.967,
+        "logged rows": 8000,
+        "logging policy": "frozen",
+        "mean CI width": 0.0114,
+        "rmse": 0.0021,
+        "trials": 60
+      },
+      {
+        "arm-share drift": 0.069,
+        "bias": 0.0004,
+        "bootstrap": "rows",
+        "dr coverage_95": 0.967,
+        "logged rows": 8000,
+        "logging policy": "online learner",
+        "mean CI width": 0.0116,
+        "rmse": 0.002,
+        "trials": 60
+      },
+      {
+        "arm-share drift": 0.069,
+        "bias": 0.0004,
+        "bootstrap": "blocks of 250",
+        "dr coverage_95": 0.967,
+        "logged rows": 8000,
+        "logging policy": "online learner",
+        "mean CI width": 0.0113,
+        "rmse": 0.002,
         "trials": 60
       }
     ],

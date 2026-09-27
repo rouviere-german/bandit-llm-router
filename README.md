@@ -22,7 +22,7 @@ and it takes the consequences seriously:
    ran *would have* earned.
 3. **Promotion is a gate, not a deploy.** A candidate becomes eligible only if its DR lower
    confidence bound beats the incumbent's estimate, its effective sample size clears a minimum, and
-   its worst-case exploration cost fits a budget. Then a second principal has to approve it, and the
+   its exploration cost over a horizon fits a budget. Then a second principal has to approve it, and the
    activation is hash-chain audited.
 
 Everything runs offline on a CPU. The simulator and a seeded fake provider make routing, learning,
@@ -53,7 +53,7 @@ flowchart TB
 
     subgraph gov["Governance: a policy cannot deploy itself"]
         log --> ope["IPS / SNIPS / DR<br/>cross-fitted ridge reward model<br/>bootstrap CIs, ESS"]
-        ope --> screen{"Eligible?<br/>DR lower bound beats incumbent<br/>ESS at or above minimum<br/>worst-case USD within cap"}
+        ope --> screen{"Eligible?<br/>DR lower bound beats incumbent<br/>ESS at or above minimum<br/>horizon cost bound within cap"}
         screen -->|no| refuse["Refused, and audited"]
         screen -->|yes| propose["propose"]
         propose --> approve["approve<br/>(a different principal)"]
@@ -73,7 +73,12 @@ Three details carry most of the weight:
 - **Exploration is priced before it happens.** The budget guard admits a call only if the arm's cost
   ceiling still fits the tenant's remaining cap, so `spent <= cap` is an invariant, and an arm the
   policy wants is simply unavailable rather than overdrawn. Screening applies the same idea over a
-  horizon: a candidate whose worst case busts a budget is refused however good it looks.
+  horizon: every logged context is charged at the *ceiling* price of each arm, weighted by the
+  candidate's own action distribution, plus a one-sided deviation term, and a candidate whose bound
+  busts the budget is refused however good it looks. This is a high-probability bound on total spend,
+  not a supremum, and it is per candidate by construction -- the supremum ("the dearest reachable arm
+  every request") is also reported, but it cannot be the gate, because a propensity floor leaves
+  every arm reachable and collapses it to one constant for every candidate.
 - **Thompson sampling is deployed as its Monte-Carlo action distribution**, because a sampled argmax
   has no closed-form propensity and logging it as certain would silently invalidate the log
   (ADR 0003).
@@ -100,8 +105,12 @@ Requirements: [uv](https://docs.astral.sh/uv/) and Python 3.12. No API key neede
 uv sync --frozen
 uv run python tasks.py demo    # one simulated day, end to end, offline (~45s)
 uv run python tasks.py check   # ruff, mypy --strict, pytest + coverage, bandit, pip-audit, baseline
-uv run python tasks.py bench   # all four benches against bench/thresholds.json (~8 min)
+uv run python tasks.py bench   # all four benches against bench/thresholds.json (~10 min)
 ```
+
+A bench run writes its JSON to `bench/results/latest/`, which is gitignored, so the quickstart leaves
+a clean working tree. The tracked `bench/results/*.json` is the single run every table below was
+copied from; `--update-reference` on an individual bench is what rewrites it.
 
 On Windows, or any machine where the repo drive is small, keep the environment elsewhere:
 `$env:UV_PROJECT_ENVIRONMENT = "C:/Users/<you>/.venvs/bandit-llm-router"`.
@@ -110,8 +119,14 @@ On Windows, or any machine where the repo drive is small, keep the environment e
 Windows. Targets: `lint format typecheck test bench demo bandit pip-audit audit baseline check`.
 
 The demo prints seven sections: policies over one request stream, a mid-day quality shift, OPE
-against the simulator's exact values, screening and activation (with the true values next to the
-gate's verdicts), hostile feedback, the live service path on DuckDB, and an MLflow run.
+against the simulator's exact values, screening and activation, hostile feedback, the live service
+path on DuckDB, and an MLflow run. The screening section runs **two** sweeps -- trained candidates
+against the cost-blind status quo, which are admitted and one of which is activated for real, and
+static arms against a converged incumbent, which are refused -- because under a cost-penalized reward
+nothing is genuinely worse than always-Opus, so a single sweep against that incumbent could only ever
+refuse a copy of itself. Each verdict is printed next to the candidate's *exact* policy value, and
+`tests/integration/test_cli_demo.py` asserts every admission is genuinely better and every refusal
+genuinely worse, strictly.
 
 Run the service:
 
@@ -139,18 +154,19 @@ the decision log and audit chain. Image build, smoke test, hadolint, trivy and t
 
 ## Results
 
-Every number below was copied from one `uv run python tasks.py bench` run on 2026-09-28, which runs
-all four benches shown; each also runs standalone by the command given under its heading. Machine:
-Windows 10 (10.0.19045), Intel64 Family 6 Model 158 (6 logical CPUs), Python 3.12.14, CPU only, no
-API key. Each bench enforces its own section of `bench/thresholds.json` and every one printed
-"all ... within thresholds". CI runs the same commands (jobs `bench` and `evaluation`).
+Every number below was copied from the committed `bench/results/*.json`, written by one bench run on
+2026-09-28 with `--check --update-reference`; each bench also runs standalone by the command given
+under its heading. Machine: Windows 10 (10.0.19045), Intel64 Family 6 Model 158 (6 logical CPUs),
+Python 3.12.14, CPU only, no API key. Each bench enforces its own section of `bench/thresholds.json`
+and every one printed "all ... within thresholds". CI runs the same commands (jobs `bench` and
+`evaluation`). MODEL_CARD.md quotes the same run, including its timings.
 
 The simulations are seeded, so the reward, cost, regret, OPE and robustness figures reproduce exactly
 on a rerun; only the timings move.
 
 ### Learning and cost, 200,000 simulated requests
 
-`uv run python bench/bench_regret.py --check` (114.4s). All policies see the *same* request stream.
+`uv run python bench/bench_regret.py --check` (111.2s). All policies see the *same* request stream.
 `in_class_slope` is the fitted log-log slope of regret against the best policy the linear model class
 can represent; below 1 means sublinear, so the learner is still closing the gap.
 
@@ -182,7 +198,7 @@ the slopes separate cleanly:
 
 ### Off-policy evaluation accuracy, 40,000 logged rows
 
-`uv run python bench/bench_ope.py --check` (153.7s). Estimates are scored against the simulator's
+`uv run python bench/bench_ope.py --check` (204.8s). Estimates are scored against the simulator's
 *exact* policy values, over 60 trials (15 seeds x 4 candidates), at two logging propensity floors.
 
 | logging floor | estimator | bias | RMSE | 95% CI coverage | mean ESS |
@@ -209,9 +225,39 @@ What the gate did with those estimates, swept over candidate quality:
 | vs a converged incumbent | 9 | **9 (100%)** | 0 | -- |
 | vs a stale cost-blind incumbent | 0 | -- | 9 | **9 (100%)** |
 
+#### The coverage above is for a *frozen* logging policy. The shipped gate's log is not frozen.
+
+`RouterService.screen` evaluates candidates on the decision log the live policy wrote **while it was
+learning**: every row's propensity depends on the rewards of the rows before it, so the rows are not
+i.i.d. and a percentile bootstrap over single rows is assuming they are. Filtering cannot fix it --
+`policy_version` hashes hyperparameters, so one learning LinUCB keeps one version for its whole life.
+
+So it is measured rather than argued. The same 4 candidates and 15 seeds, logged twice at 8,000 rows,
+once frozen and once by a learner starting cold, with the DR interval computed both ways on
+*identical* data:
+
+| logging policy | bootstrap | DR 95% coverage | mean CI width | RMSE | arm-share drift |
+|---|---|---:|---:|---:|---:|
+| frozen | rows | 0.967 | 0.0115 | 0.0021 | 0.023 |
+| frozen | blocks of 250 | 0.967 | 0.0114 | 0.0021 | 0.023 |
+| online learner | rows | 0.967 | 0.0116 | 0.0020 | 0.069 |
+| online learner | blocks of 250 | 0.967 | 0.0113 | 0.0020 | 0.069 |
+
+**The measured degradation on this workload is zero**, and that is the honest headline: 0.967 in all
+four cells. The theoretical concern is real -- and the reason importance weighting survives it is
+that it is conditionally unbiased, so each row's term is a martingale difference and the naive
+variance estimate stays roughly right. `arm-share drift` is the non-vacuity check: it is the
+total-variation distance between the first and last tenth of each log's arm shares, 0.069 for the
+learner against a 0.023 sampling-noise floor for the frozen logger, and `bench/thresholds.json` fails
+the bench if the "online" log stops being adaptive. Two mitigations ship anyway, because a measurement
+on one simulator is not a proof: the service's bootstrap resamples contiguous blocks of 250 rows by
+default (`APP_SCREENING_BOOTSTRAP_BLOCK_SIZE`), and `POST /v1/policies/{digest}/screen` takes
+`min_policy_step` / `max_policy_step` so an operator can screen on a stretch of the log over which the
+posterior barely moved.
+
 ### Adaptation after a mid-run model update, 120,000 requests
 
-`uv run python bench/bench_router.py --check` (151.5s). At one third of the run, Haiku -- which
+`uv run python bench/bench_router.py --check` (151.2s). At one third of the run, Haiku -- which
 carries ~82% of the traffic -- degrades on every prompt family. "Recover" means getting the trailing
 reward ratio back to 95% of oracle.
 
@@ -229,22 +275,31 @@ that the stationary policy really is hurt, so this comparison cannot quietly bec
 
 ### Robustness to feedback poisoning, 40,000 requests
 
-10% of decisions receive hostile reward reports, replayed identically with the defenses off, half on,
-and fully on.
+10% of decisions receive hostile reward reports, replayed identically through four channels.
 
 | feedback | defenses | mean decision value | value drop |
 |---|---|---:|---:|
 | honest only | -- | 0.6495 | 0 |
 | 10% adversarial | none | 0.4168 | **0.2327** |
 | 10% adversarial | clipping only | 0.6493 | 0.0002 |
-| 10% adversarial | full pipeline | 0.6494 | 0.0001 |
+| 10% adversarial | full aggregation (the **stored** reward) | 0.6494 | 0.0001 |
+| 10% adversarial | online posterior (first report, clipped) | 0.6452 | **0.0043** |
 
 Undefended, a tenth of the feedback destroys 36% of the policy's value -- roughly the difference
 between a learned router and always-Opus. Clipping alone recovers almost all of it, which is the
 honest finding: **bounding the reward range is where nearly all of the benefit is**, and the robust
 aggregation earns the remaining 0.0001 plus protection against attacks clipping cannot see (many
-reports inside the valid range). The defenses do not survive a hostile *majority* of sources; that
-limit is tested explicitly and documented in the threat model.
+reports inside the valid range).
+
+The last row exists because the third does not describe the deployed learner. The full aggregation
+protects the **stored** reward -- what OPE and offline retraining read -- while `submit_feedback`
+teaches the **online** posterior from the *first accepted report only* (an online ridge update cannot
+be withdrawn, so applying several would double-count one outcome). One report is one source, so the
+per-source median and the weighted median never run on that path: clipping and the reduced
+single-source weight are its whole defense, and its measured drop is 43x the full pipeline's. Two more
+limits, both asserted by tests rather than implied: a hostile **majority** of sources wins, and at
+exactly **two** sources the *lower* report wins, so a suppression attacker beats one honest source
+while an inflation attacker does not -- the minimum-independent-sources requirement is three.
 
 ### Routing overhead, 2,000 requests through the live path
 
@@ -254,8 +309,8 @@ logged all 2,000 decisions.
 
 | budget guard | p50 (us) | p95 (us) | p99 (us) |
 |---|---:|---:|---:|
-| shared budget file (default) | 25,348 | 34,519 | 47,807 |
-| in-memory guard | 6,092 | 12,129 | 29,459 |
+| shared budget file (default) | 24,817 | 31,514 | 48,669 |
+| in-memory guard | 6,000 | 12,233 | 30,499 |
 
 The shared file costs ~19ms per request at p50: two atomic writes plus a reload under a file lock,
 per reserve and per commit, so several workers draw from one cap. That is a deliberate trade of
@@ -267,19 +322,19 @@ latency for a correct multi-worker budget, and it is disk-bound on this machine.
 
 | benchmark | runs | p50 (us) | p95 (us) |
 |---|---:|---:|---:|
-| redact_text_1kb | 2000 | 342.0 | 452.0 |
-| rate_limiter_check | 20000 | 1.8 | 2.1 |
-| llm_request_sha256_10_messages | 2000 | 98.5 | 166.2 |
-| audit_append_fsync | 200 | 7981.4 | 11618.1 |
-| audit_verify_1000_entries | 10 | 35180.9 | 37543.3 |
-| drift_check_10k_vs_10k | 30 | 2632.2 | 3101.3 |
+| redact_text_1kb | 2000 | 339.5 | 425.4 |
+| rate_limiter_check | 20000 | 1.9 | 2.0 |
+| llm_request_sha256_10_messages | 2000 | 98.3 | 126.9 |
+| audit_append_fsync | 200 | 7857.1 | 12350.0 |
+| audit_verify_1000_entries | 10 | 34104.4 | 36157.2 |
+| drift_check_10k_vs_10k | 30 | 2609.4 | 3194.6 |
 
 `audit_append_fsync` includes one `fsync` per entry, so it mostly measures the disk. These are
 single-machine numbers for spotting regressions, not performance claims.
 
 ### Test suite
 
-`uv run python tasks.py test`: **763 passed, 1 skipped** in 273s, line+branch coverage **97.9%**
+`uv run python tasks.py test`: **784 passed, 1 skipped** in 294s, line+branch coverage **97.90%**
 (floor 85%).
 Property-based tests (hypothesis) cover the invariants that matter: propensities sum to 1 and respect
 their floor; the reward stays in [0, 1] for every cost weight; committed spend never exceeds a cap
@@ -299,7 +354,11 @@ attention:
   followed by a weighted median whose weights are capped *strictly* below one half (a cap of exactly
   one half is refused, because the weighted median would then be owned by whoever reaches half the
   weight first). A single-source reward learns with reduced weight. The measured worth of all this is
-  the table above. **A hostile majority of sources wins** -- tested and stated, not hidden.
+  the table above. Three limits, each asserted by a test rather than implied: **a hostile majority of
+  sources wins**; at exactly **two** sources the *lower* report wins, so suppression succeeds where
+  inflation fails and the real requirement is three independent sources; and the aggregation protects
+  the **stored** reward, not the **online** posterior, which learns from one clipped report and is
+  therefore defended by clipping and the reduced single-source weight alone.
 - **Cost exhaustion.** Per-tenant USD caps are enforced *before* the provider call, against the arm's
   worst-case cost, so `spent <= cap` is a property rather than a hope; a failed call refunds its
   reservation. Screening bounds exploration over a horizon the same way.
@@ -334,6 +393,23 @@ Honest scope limits, not a wish list.
 - **Real quality measurement.** Offline `quality` is a simulator proxy with a written-down functional
   form. Every number above validates the learning, evaluation and governance machinery; none of them
   is evidence about a real quality/price frontier. See [MODEL_CARD.md](MODEL_CARD.md).
+- **Valid inference on adaptively collected logs.** The coverage this repo measures is for a *frozen*
+  logging policy. The shipped gate screens on the log the live learner wrote, which is not i.i.d. in
+  its rows; the degradation measures zero on this workload (0.967 either way, table above), the
+  service resamples contiguous blocks by default and the screen endpoint takes a `policy_step` window,
+  but none of that is a validity *proof* for adaptive data. Anytime-valid confidence sequences, or a
+  martingale concentration bound in place of the bootstrap, are the real answer and are not done here.
+- **A hard supremum on exploration cost.** Gate 3 is a high-probability bound on horizon spend (the
+  arms' ceiling prices under the candidate's own distribution plus three standard deviations of the
+  horizon total), not a worst case that cannot be exceeded. The true supremum is reported alongside it
+  but cannot be the gate, because a propensity floor keeps every arm reachable and makes it the same
+  constant for every candidate. What actually hard-bounds spend is the runtime tenant guard, which
+  reserves each call's ceiling before the provider is called.
+- **Corroboration before the online update.** The live posterior learns from the first accepted report
+  for a decision, so it gets clipping and a reduced single-source weight but never the per-source
+  median or the weighted median; the poisoning table publishes that channel's own number rather than
+  the stronger one. Holding a decision open for a short window so several sources can vote before the
+  first online update would close the gap and is not implemented.
 - **Calibrated DR intervals.** DR's bootstrap coverage measures 0.983-1.000 against a nominal 0.95 --
   conservative, outside the `[0.90, 0.98]` band originally targeted. The gate is therefore stricter
   than nominal, which is the safe direction, but tightening the interval (studentized or BCa

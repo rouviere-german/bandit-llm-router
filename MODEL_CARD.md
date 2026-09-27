@@ -1,8 +1,9 @@
 # Model card: bandit-llm-router routing policy
 
-Format after Mitchell et al., "Model Cards for Model Reporting" (FAT* 2019). Every number here was
-copied from the output of the command shown next to it, run on 2026-09-28 on Windows 10
-(10.0.19045), Intel64 Family 6 Model 158 (6 logical CPUs), Python 3.12.14, CPU only.
+Format after Mitchell et al., "Model Cards for Model Reporting" (FAT* 2019). Every number here,
+timings included, was copied from the committed `bench/results/*.json` written by the bench run of
+2026-09-28 -- the same run README.md quotes -- on Windows 10 (10.0.19045), Intel64 Family 6 Model 158
+(6 logical CPUs), Python 3.12.14, CPU only.
 
 **The one thing to read first:** the quality signal these results are measured against is a
 **simulator proxy**, not human or rubric judgement of real model output. Everything below is evidence
@@ -27,10 +28,13 @@ with a real one, and the *first* question then is whether that signal means what
 - **Artifact format:** JSON snapshot of the posterior arrays plus hyperparameters, content-addressed
   by SHA-256. Never pickle; npz is loaded with `allow_pickle=False`. A snapshot whose parameters were
   edited is refused when rebuilt.
-- **Reproducibility manifest:** every decision log row carries the featurizer version, policy version
-  and cost basis; every simulation and MLflow run carries the simulator seed, the workload digest and
-  the environment digest. `uv run python tasks.py demo` prints both digests, and two runs print
-  identical numbers.
+- **Reproducibility manifest:** every decision log row carries the featurizer version, the policy
+  version, the policy *step* (the posterior's update count when the row was written) and the cost
+  basis. When the traffic comes from a simulator -- the demo and `bench/bench_router.py` -- the row
+  also carries that workload's digest and its seed, passed in at construction; under real callers both
+  stay NULL rather than being invented. Every simulation and MLflow run carries the simulator seed, the
+  workload digest and the environment digest. `uv run python tasks.py demo` prints both digests, and
+  two runs print identical numbers.
 
 ## Intended use
 
@@ -101,7 +105,7 @@ seeds from the ones they trained on, and OPE is scored against the simulator's *
 
 ### Learning and cost
 
-`uv run python bench/bench_regret.py --check` -- 200,000 requests, 123.6s.
+`uv run python bench/bench_regret.py --check` -- 200,000 requests, 111.2s.
 
 | Metric | LinUCB | Thompson | Target |
 |---|---:|---:|---|
@@ -117,24 +121,51 @@ epsilon-greedy 311.6 (0.876), static 7258.3 (0.996).
 
 ### Off-policy evaluation
 
-`uv run python bench/bench_ope.py --check` -- 40,000 logged rows, 60 trials per row, 163.3s.
+`uv run python bench/bench_ope.py --check` -- 40,000 logged rows, 60 trials
+(15 seeds x 4 candidates), 204.8s.
 
 | logging floor | estimator | bias | RMSE | 95% coverage |
 |---|---|---:|---:|---:|
 | 0.05 | ips / snips / dr | -0.0004 / +0.0001 / -0.0001 | 0.0036 / 0.0022 / 0.0007 | 0.983 / 0.950 / 1.000 |
 | 0.01 | ips / snips / dr | -0.0009 / -0.0002 / -0.0003 | 0.0059 / 0.0035 / 0.0011 | 0.967 / 0.933 / 0.983 |
 
-**Calibration caveat.** DR is the most accurate estimator by RMSE (5x better than IPS) but its
-bootstrap intervals are *conservative*: 0.983-1.000 coverage against a nominal 0.95, above the
-[0.90, 0.98] band targeted for this project. For a promotion gate the direction is the safe one -- an
-over-wide interval refuses candidates rather than admitting bad ones -- but it means the gate is
-stricter than "95% confidence" suggests, and DR interval widths should not be quoted as calibrated
-uncertainty. SNIPS (0.950 / 0.933) is the calibrated estimator.
+**Calibration caveat 1 -- the intervals are conservative.** DR is the most accurate estimator by RMSE
+(5x better than IPS) but its bootstrap intervals are *conservative*: 0.983-1.000 coverage against a
+nominal 0.95, above the [0.90, 0.98] band targeted for this project. For a promotion gate the
+direction is the safe one -- an over-wide interval refuses candidates rather than admitting bad ones --
+but it means the gate is stricter than "95% confidence" suggests, and DR interval widths should not be
+quoted as calibrated uncertainty. SNIPS (0.950 / 0.933) is the calibrated estimator.
+
+**Calibration caveat 2 -- these numbers are for a frozen logging policy, and the gate's own log is not
+frozen.** The table above comes from a deliberately frozen logger, so its rows are i.i.d. given the
+context stream and a bootstrap over rows measures what it claims. `RouterService.screen` does not have
+that luxury: it evaluates candidates on the log the live policy wrote while it was learning, where
+each row's propensity depends on earlier rewards. The measured cost of that, on the same candidates
+and seeds logged twice at 8,000 rows, is **zero** -- DR coverage 0.967 for the frozen logger and 0.967
+for the learner, under both the row bootstrap and a block bootstrap over contiguous rows (README
+Results has the full table, with the arm-share drift that proves the "online" log really was
+adaptive). The reason the estimator survives is that importance weighting is conditionally unbiased,
+so each row's term is a martingale difference. Because one simulator is not a proof, the service
+resamples contiguous blocks of 250 rows by default and the screen endpoint accepts a `policy_step`
+window; genuinely anytime-valid inference for adaptive data is a README non-goal.
 
 Screening decisions, swept over candidate quality: 9/9 truly worse candidates rejected against a
 converged incumbent, 9/9 truly better candidates admitted against a stale cost-blind incumbent. The
-demo additionally checks its own activation against ground truth: every candidate the gate admitted
-really was better than the incumbent by exact policy value.
+demo additionally checks its own verdicts against ground truth, in the same two-incumbent shape and
+with strict inequalities: every admitted candidate is genuinely better than its incumbent by exact
+policy value, and every refused one genuinely worse.
+
+**The cost gate, precisely.** Gate 3 bounds spend over a horizon by charging every logged context at
+each arm's *ceiling* price weighted by the candidate's own action distribution, plus a one-sided
+deviation term (`cost_bound_z`, default 3 standard deviations of the horizon total). It is therefore a
+high-probability bound on total spend, not a supremum, and it *discriminates between candidates*: in
+the demo, at a horizon of 100,000 requests, a trained cost-aware policy is priced at 225 USD,
+always-Sonnet at 274 and always-Opus at 654, against a 300 USD cap. The supremum -- the dearest
+reachable arm on every request -- is reported alongside as `dearest_arm_usd_per_request`, but it cannot
+be the gate: every policy here applies a propensity floor, so every arm stays reachable and the
+supremum is the same constant for every candidate. Hard bounding of spend is the runtime budget
+guard's job, not this bound's: it reserves each call's ceiling against the tenant cap before the
+provider is called.
 
 ### Adaptation
 
@@ -149,11 +180,22 @@ really was better than the incumbent by exact policy value.
 ## Robustness, drift and monitoring
 
 - **Adversarial feedback:** with 10% of decisions attacked, mean decision value drops 0.2327 (36%)
-  undefended, 0.0002 with clipping only, 0.0001 with the full pipeline. The honest reading is that
-  **bounding the reward range is where nearly all of the protection is**; robust aggregation covers
-  attacks that stay inside the valid range. A hostile *majority* of sources defeats the median, which
-  is asserted by a test rather than left implicit
-  (`tests/unit/test_feedback.py::test_a_majority_attacker_wins_and_the_docs_say_so`).
+  undefended, 0.0002 with clipping only, and 0.0001 with the full aggregation. The honest reading is
+  that **bounding the reward range is where nearly all of the protection is**; robust aggregation
+  covers attacks that stay inside the valid range.
+- **What the *online* learner actually gets, which is weaker:** the full aggregation protects the
+  **stored** reward that OPE and offline retraining read. The live posterior learns from the **first
+  accepted report only**, so one report means one source and the per-source median and weighted median
+  never run -- clipping and the reduced single-source weight are its whole defense. Measured on the
+  same poisoned stream: value drop **0.0043**, 43x the full pipeline's 0.0001. Published as its own
+  row in `bench/bench_router.py` rather than folded into the number above.
+- **Two more limits, both asserted by tests:** a hostile *majority* of sources defeats the median
+  (`tests/unit/test_feedback.py::test_a_majority_attacker_wins_and_the_docs_say_so`); and at exactly
+  **two** sources the *lower* report wins, because two weights renormalise to `[0.5, 0.5]` and the
+  lower weighted median lands on the first sorted value. So a **suppression** attacker reporting
+  `reward_min` beats one honest source while an inflation attacker does not, and the
+  minimum-independent-sources requirement is **three**
+  (`test_with_two_sources_the_lower_report_wins_so_suppression_beats_inflation`).
 - **Small logging propensities:** OPE accuracy is measured at floors 0.05 and 0.01 so the effect of
   large importance weights on each estimator is visible rather than assumed.
 - **Property-based invariants (hypothesis):** propensities sum to 1 and respect their floor for

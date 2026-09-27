@@ -7,33 +7,33 @@
   },
   "results": {
     "audit_append_fsync": {
-      "p50_us": 7981.4,
-      "p95_us": 11618.1,
+      "p50_us": 7857.1,
+      "p95_us": 12350.0,
       "runs": 200
     },
     "audit_verify_1000_entries": {
-      "p50_us": 35180.9,
-      "p95_us": 37543.3,
+      "p50_us": 34104.4,
+      "p95_us": 36157.2,
       "runs": 10
     },
     "drift_check_10k_vs_10k": {
-      "p50_us": 2632.2,
-      "p95_us": 3101.3,
+      "p50_us": 2609.4,
+      "p95_us": 3194.6,
       "runs": 30
     },
     "llm_request_sha256_10_messages": {
-      "p50_us": 98.5,
-      "p95_us": 166.2,
+      "p50_us": 98.3,
+      "p95_us": 126.9,
       "runs": 2000
     },
     "rate_limiter_check": {
-      "p50_us": 1.8,
-      "p95_us": 2.1,
+      "p50_us": 1.9,
+      "p95_us": 2.0,
       "runs": 20000
     },
     "redact_text_1kb": {
-      "p50_us": 342.0,
-      "p95_us": 452.0,
+      "p50_us": 339.5,
+      "p95_us": 425.4,
       "runs": 2000
     }
   }
