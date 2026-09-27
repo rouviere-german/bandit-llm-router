@@ -42,9 +42,17 @@ def small_demo(monkeypatch: pytest.MonkeyPatch) -> None:
 def check_governance(activation: object) -> None:
     """A candidate was screened, approved by a second principal and activated -- and rightly so.
 
-    The second half is the part worth having: the demo reports each candidate's *true* policy value
-    alongside the gate's verdict, so the test can check the gate was right rather than merely that
-    it fired. A gate that admitted everything would pass the first half of this function.
+    The second half is the part worth having: the demo reports each candidate's *exact* policy value
+    next to the gate's verdict, so the test checks the gate was right rather than merely that it
+    fired. A gate that admitted everything would pass the first half of this function.
+
+    Two things are asserted strictly on purpose, because a weaker version of each used to hide a
+    real hole. ``>`` and ``<`` rather than ``>=``/``<=``: a candidate that *is* the incumbent
+    satisfies a non-strict comparison by equality, so the refusal it earns is arithmetic rather than
+    evidence and the assertion cannot fail. And the refusals must come from a sweep with a
+    *different* incumbent, because under the cost-penalized reward nothing is genuinely worse than
+    the always-largest status quo -- a refusal in that sweep could only ever be the incumbent's own
+    twin.
     """
     assert isinstance(activation, dict)
     assert activation["activated"] is True
@@ -52,18 +60,41 @@ def check_governance(activation: object) -> None:
     assert int(activation["audit_entries"]) >= 3
     refused = activation["refused"]
     assert isinstance(refused, dict)
-    assert "always_opus" in refused
-    assert refused["always_opus"] == "NotEligibleError"
+    assert set(refused) == {"always_opus", "always_sonnet"}
+    assert set(refused.values()) == {"NotEligibleError"}
 
     verdicts = activation["verdicts"]
     assert isinstance(verdicts, dict)
-    incumbent_truth = float(activation["incumbent_true_value"])
     admitted = {name: v for name, v in verdicts.items() if v["eligible"]}
+    rejected = {name: v for name, v in verdicts.items() if not v["eligible"]}
     assert admitted, "the demo is meant to show a promotion, not only refusals"
+    assert rejected, "and a refusal, or the gate is never seen saying no"
     for name, verdict in admitted.items():
-        assert float(verdict["true_value"]) > incumbent_truth, f"{name} was admitted but is worse"
-    assert verdicts["always_opus"]["eligible"] is False
-    assert float(verdicts["always_opus"]["true_value"]) <= incumbent_truth
+        assert verdict["reasons"] == [], f"{name} was admitted with reasons {verdict['reasons']}"
+        assert float(verdict["true_value"]) > float(verdict["incumbent_true_value"]), (
+            f"{name} was admitted but is not actually better than its incumbent"
+        )
+    for name, verdict in rejected.items():
+        assert float(verdict["true_value"]) < float(verdict["incumbent_true_value"]), (
+            f"{name} was refused but is not actually worse than its incumbent"
+        )
+        assert "dr_lower_bound_does_not_beat_incumbent" in verdict["reasons"]
+
+    # The two sweeps use different incumbents, and the refusals come from the converged one.
+    incumbents = activation["incumbent_true_values"]
+    assert isinstance(incumbents, dict)
+    assert set(incumbents) == {"stale cost-blind", "converged"}
+    assert float(incumbents["converged"]) > float(incumbents["stale cost-blind"]) + 0.1
+    assert {v["incumbent"] for v in rejected.values()} == {"converged"}
+    assert {v["incumbent"] for v in admitted.values()} == {"stale cost-blind"}
+
+    # The cost gate discriminates: it fires on the candidate that hoards the dearest arm and not on
+    # the one that does not. Before the bound was priced against reachable *mass* it returned the
+    # same constant for every candidate, so this pair of assertions could not both hold.
+    opus, sonnet = verdicts["always_opus"], verdicts["always_sonnet"]
+    assert "cost_upper_bound_exceeds_budget" in opus["reasons"]
+    assert "cost_upper_bound_exceeds_budget" not in sonnet["reasons"]
+    assert float(opus["horizon_usd"]) > 2.0 * float(sonnet["horizon_usd"])
 
 
 @pytest.mark.usefixtures("small_demo")
@@ -103,13 +134,18 @@ def test_the_demo_runs_end_to_end_and_reports_what_the_readme_claims(tmp_path: P
 
     check_governance(summary["activation"])
 
-    # Poisoning: undefended feedback costs real policy value; the shipped pipeline nearly erases it.
+    # Poisoning: undefended feedback costs real policy value, the full aggregation nearly erases
+    # it -- and the online posterior's own channel, which only gets one clipped report, does worse
+    # than the full aggregation. The last comparison is the honest one about the deployed learner.
     poisoning = summary["poisoning"]
     assert isinstance(poisoning, list)
+    full = "full aggregation (stored reward)"
+    online = "online posterior (first report, clipped)"
     by_defense = {row["defenses"]: row for row in poisoning}
-    assert set(by_defense) == {"n/a", "none", "clipping only", "full"}
-    assert float(by_defense["none"]["value_drop"]) > float(by_defense["full"]["value_drop"])
-    assert float(by_defense["full"]["value_drop"]) < 0.02
+    assert set(by_defense) == {"n/a", "none", "clipping only", full, online}
+    assert float(by_defense["none"]["value_drop"]) > float(by_defense[full]["value_drop"])
+    assert float(by_defense[full]["value_drop"]) < 0.02
+    assert float(by_defense[online]["value_drop"]) > float(by_defense[full]["value_drop"])
 
     # The live path: requests served through RouterService, one tenant hitting its cap.
     service = summary["service"]
@@ -119,6 +155,14 @@ def test_the_demo_runs_end_to_end_and_reports_what_the_readme_claims(tmp_path: P
     assert int(service["decisions_logged"]) == int(service["requests_served"])
     assert int(service["policy_updates"]) > 0
     assert set(service["spend_by_tenant_usd"]) == {"tenant_main", "tenant_small"}
+    # The small tenant is served and then refused, rather than refused from the start.
+    assert int(service["tenant_small_served_before_refusal"]) > 0
+    assert service["tenant_small_refused_after_requests"] is not None
+    for tenant, cap in service["spend_cap_usd_by_tenant"].items():
+        assert float(service["spend_by_tenant_usd"][tenant]) <= float(cap)
+    # The registry path is exercised, so this field is evidence rather than a permanent zero.
+    assert int(service["registered_policy_versions"]) >= 1
+    assert len(str(service["live_policy_snapshot_digest"])) == 16
 
     assert len(str(summary["mlflow_run_id"])) == 32
     assert float(summary["seconds"]) > 0.0

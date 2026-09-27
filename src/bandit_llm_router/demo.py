@@ -10,11 +10,15 @@
    posteriors are compared on how many requests they need to get back to 95% of oracle reward.
 3. **Off-policy evaluation.** A frozen policy logs decisions; IPS, SNIPS and DR then estimate the
    value of candidates the log never ran, next to the exact value the simulator can compute.
-4. **Screening and activation.** A good and a bad candidate are screened; the good one is proposed,
-   approved by a second principal and activated; the bad one is refused. The activation audit chain
-   is verified at the end.
-5. **Hostile feedback.** The same poisoned reward stream is replayed with no defenses, with clipping
-   only, and with the shipped robust aggregation.
+4. **Screening and activation.** Two sweeps: trained candidates against the cost-blind status quo
+   (admitted, proposed, approved by a second principal, activated) and static arms against a
+   converged incumbent (refused). Every verdict is printed next to the candidate's *exact* policy
+   value, so the gate can be checked for being right rather than merely for firing. The activation
+   audit chain is verified at the end.
+5. **Hostile feedback.** The same poisoned reward stream is replayed four ways: with no defenses,
+   with clipping only, with the full aggregation that protects the *stored* reward, and through the
+   channel the *online posterior* really gets (one clipped report at the reduced single-source
+   weight). The last two are different numbers and the table says so.
 6. **The live path, offline.** Real requests go through ``RouterService`` with the offline provider:
    DuckDB logging, per-tenant budget caps (including a tenant that runs out), feedback ingestion and
    the policy learning from it.
@@ -72,6 +76,8 @@ _POISON_REQUESTS = 8_000
 _FLOOR = 0.02
 _SEED = 7
 _BOOTSTRAP = 200
+# The screening cost cap for the demo's horizon of 100,000 requests. See ``_screening_section``.
+_MAX_EXPLORATION_USD = 300.0
 
 
 def _make_policy(kind: str, environment: SimulatedEnvironment, **overrides: Any) -> Any:
@@ -205,10 +211,26 @@ def _ope_section(
     return accuracy_rows, detail_rows
 
 
-def _trained(environment: SimulatedEnvironment, kind: str, seed: int) -> LinearBanditPolicy:
+def _trained(
+    environment: SimulatedEnvironment, kind: str, seed: int, *, steps: int | None = None
+) -> LinearBanditPolicy:
     policy: LinearBanditPolicy = _make_policy(kind, environment)
-    run_simulation(environment, policy, n=_WARMUP, seed=seed + 5, learn=True)
+    run_simulation(
+        environment, policy, n=steps if steps is not None else _WARMUP, seed=seed + 5, learn=True
+    )
     return policy
+
+
+def _incumbent_converged(environment: SimulatedEnvironment) -> LinearBanditPolicy:
+    """The other realistic incumbent: a LinUCB that has already learned this workload.
+
+    Sweep 2 needs this. Against the "always the largest model" status quo *nothing* in this
+    environment is genuinely worse -- the cost-penalized reward makes pure Opus the worst
+    deterministic policy there is -- so a refusal in that sweep could only ever be a candidate
+    identical to the incumbent, which proves nothing about the gate. A converged incumbent is the
+    setting where "genuinely worse candidate" has instances.
+    """
+    return _trained(environment, "linucb", _SEED + 11, steps=_WARMUP * 3)
 
 
 def _incumbent_always_largest(environment: SimulatedEnvironment) -> LinearBanditPolicy:
@@ -235,19 +257,27 @@ def _incumbent_always_largest(environment: SimulatedEnvironment) -> LinearBandit
 def _screening_section(
     environment: SimulatedEnvironment, workdir: Path
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Two sweeps, because one incumbent cannot exercise both sides of the gate.
+
+    The logging policy is a lightly trained LinUCB in both sweeps, so the *evidence* is identical
+    and only the incumbent and the candidates change.
+
+    * **Against the stale cost-blind incumbent** -- the README's status quo, everything to the
+      largest model -- two freshly trained policies are genuinely better, and the gate admits them.
+      One of them is then proposed, approved by a second principal and activated for real.
+    * **Against a converged incumbent** -- a LinUCB that already learned this workload -- the static
+      arms are genuinely worse, and the gate refuses them.
+
+    Why two sweeps rather than one: under the cost-penalized reward, pure Opus is the *worst*
+    deterministic policy in this environment, so against the always-largest incumbent no candidate
+    can be genuinely worse. A refusal in that sweep could only be a candidate identical to the
+    incumbent -- whose own DR lower bound can never beat its own point estimate, making the refusal
+    arithmetically certain and evidentially empty. Splitting the sweeps is what makes both verdicts
+    mean something, and every one of them is checked against ``true_value`` below.
+    """
     from bandit_llm_router.ope.screening import screen_candidate  # noqa: PLC0415
 
-    # The logging policy is a lightly trained LinUCB; the *incumbent* it is compared against is the
-    # status quo from the README's problem statement -- everything to the largest model. That is the
-    # realistic shape of a first promotion: a static rule is live, and a learned policy has to prove
-    # on the logs that it is better before it may replace it.
-    #
-    # Every verdict below is checkable against ``true_value``, which is why both an admission and a
-    # refusal are shown. ``always_opus`` is the instructive refusal: its DR point estimate (~0.43)
-    # actually flatters its truth (~0.41) because the log almost never took that action, and the ESS
-    # gate is what catches the thin evidence rather than the point estimate.
     logger = _trained(environment, "linucb", _SEED)
-    incumbent = _incumbent_always_largest(environment)
     logging_run = run_simulation(environment, logger, n=_LOG_REQUESTS, seed=_SEED + 1, learn=False)
     batch = logging_run.log.to_batch(environment)
     expected = environment.cost_matrix[logging_run.log.pool_indices]
@@ -256,37 +286,89 @@ def _screening_section(
         min_ess=200.0,
         bootstrap=_BOOTSTRAP,
         horizon_requests=100_000,
-        # Sized so a sensible candidate is not refused on cost alone, while ``always_opus`` -- whose
-        # worst case is every request at the dearest arm's ceiling -- still is.
-        max_exploration_usd=900.0,
+        # Sized between the candidates on purpose. Measured on this workload at a horizon of
+        # 100,000 requests: a trained, cost-aware policy's bound lands near 220 USD and
+        # ``always_sonnet`` near 270, so neither is refused on cost; ``always_opus``, which parks
+        # 96% of its mass on the dearest arm, lands near 650 and is. So the cost gate is the *only*
+        # difference between the two refusals, which is what makes it a gate rather than a constant.
+        # (At full size the static arms' ESS is ~300 against the 200 minimum, so the evidence gate
+        # does not fire here; it does at the reduced sizes the integration test runs, where a few
+        # thousand rows really is thin evidence for a policy concentrated on one rarely logged arm.)
+        max_exploration_usd=_MAX_EXPLORATION_USD,
     )
-    candidates = {
-        "trained_thompson": _trained(environment, "thompson", _SEED + 2),
-        "trained_linucb": _trained(environment, "linucb", _SEED + 6),
-        "always_opus": _make_policy("opus", environment),
-    }
-    rows = []
-    reports = {}
-    truths: dict[str, float] = {}
-    for name, candidate in candidates.items():
-        report = screen_candidate(
-            batch,
-            candidate=candidate,
-            incumbent=incumbent,
-            expected_cost_micros=expected,
-            ceiling_cost_micros=ceiling,
-            config=config,
-            rng=np.random.default_rng(_SEED + 3),
+    sweeps: tuple[tuple[str, LinearBanditPolicy, dict[str, Any]], ...] = (
+        (
+            "stale cost-blind",
+            _incumbent_always_largest(environment),
+            {
+                "trained_thompson": _trained(environment, "thompson", _SEED + 2),
+                "trained_linucb": _trained(environment, "linucb", _SEED + 6),
+            },
+        ),
+        (
+            "converged",
+            _incumbent_converged(environment),
+            {
+                "always_opus": _make_policy("opus", environment),
+                "always_sonnet": _make_policy("sonnet", environment),
+            },
+        ),
+    )
+
+    rows: list[dict[str, Any]] = []
+    reports: dict[str, Any] = {}
+    candidates: dict[str, Any] = {}
+    verdicts: dict[str, dict[str, Any]] = {}
+    incumbent_truths: dict[str, float] = {}
+    for label, incumbent, sweep_candidates in sweeps:
+        incumbent_truths[label] = round(
+            true_policy_value(
+                environment,
+                incumbent,
+                logging_run.log.pool_indices,
+                rng=np.random.default_rng(_SEED + 8),
+            ),
+            4,
         )
-        reports[name] = report
-        truth = true_policy_value(
-            environment,
-            candidate,
-            logging_run.log.pool_indices,
-            rng=np.random.default_rng(_SEED + 4),
-        )
-        truths[name] = round(truth, 4)
-        rows.append({**report.summary_row(), "candidate": name, "true_value": truths[name]})
+        for name, candidate in sweep_candidates.items():
+            report = screen_candidate(
+                batch,
+                candidate=candidate,
+                incumbent=incumbent,
+                expected_cost_micros=expected,
+                ceiling_cost_micros=ceiling,
+                config=config,
+                rng=np.random.default_rng(_SEED + 3),
+            )
+            reports[name] = report
+            candidates[name] = candidate
+            truth = round(
+                true_policy_value(
+                    environment,
+                    candidate,
+                    logging_run.log.pool_indices,
+                    rng=np.random.default_rng(_SEED + 4),
+                ),
+                4,
+            )
+            rows.append(
+                {
+                    **report.summary_row(),
+                    "candidate": name,
+                    "incumbent": label,
+                    "true_value": truth,
+                    "incumbent_true_value": incumbent_truths[label],
+                }
+            )
+            # Kept so a test can check the gate was *right*, not merely that it fired.
+            verdicts[name] = {
+                "eligible": report.eligible,
+                "reasons": list(report.reasons),
+                "true_value": truth,
+                "incumbent": label,
+                "incumbent_true_value": incumbent_truths[label],
+                "horizon_usd": round(report.cost.upper_bound_horizon_usd, 2),
+            }
 
     # Register, propose, approve and activate the eligible candidate through the real controller.
     settings = Settings(_env_file=None, data_dir=workdir / "service", environment="test")
@@ -320,20 +402,13 @@ def _screening_section(
             refused[name] = type(exc).__name__
     verification = verify_file(service.audit.path)
     service.store.close()
-    incumbent_truth = true_policy_value(
-        environment, incumbent, logging_run.log.pool_indices, rng=np.random.default_rng(_SEED + 8)
-    )
     return rows, {
         **activation,
         "refused": refused,
         "audit_ok": verification.ok,
         "audit_entries": verification.entries,
-        # Kept so a test can check the gate was *right*, not merely that it fired.
-        "incumbent_true_value": round(incumbent_truth, 4),
-        "verdicts": {
-            name: {"eligible": report.eligible, "true_value": truths[name]}
-            for name, report in reports.items()
-        },
+        "incumbent_true_values": incumbent_truths,
+        "verdicts": verdicts,
     }
 
 
@@ -356,10 +431,14 @@ def _poisoning_section(environment: SimulatedEnvironment) -> list[dict[str, Any]
         }
     )
     baseline = float(clean.log.decision_values.mean())
+    # The last row is the one the deployed online learner actually gets: the service teaches the
+    # posterior from the *first* accepted report for a decision, so the per-source median and the
+    # weighted median never run there. The row above it is the stored reward that OPE reads.
     ablation: tuple[tuple[AggregationMode, str], ...] = (
         ("none", "none"),
         ("clip_only", "clipping only"),
-        ("robust", "full"),
+        ("robust", "full aggregation (stored reward)"),
+        ("first_report_only", "online posterior (first report, clipped)"),
     )
     for mode, label in ablation:
         result = run_simulation(
@@ -385,9 +464,14 @@ def _poisoning_section(environment: SimulatedEnvironment) -> list[dict[str, Any]
 def _service_section(environment: SimulatedEnvironment, workdir: Path) -> dict[str, Any]:
     """Real requests through ``RouterService`` on the offline provider.
 
-    ``tenant_small`` is capped low on purpose so the budget guard visibly refuses it part way
-    through; ``tenant_main`` is capped high enough that the rest of the section -- DuckDB logging,
-    feedback ingestion, the policy learning from it -- actually runs.
+    ``tenant_small`` is capped low on purpose so the budget guard visibly refuses it, and
+    ``tenant_main`` is capped high enough that the rest of the section -- DuckDB logging, feedback
+    ingestion, the policy learning from it, a registry snapshot of the live policy -- actually runs.
+
+    The two tenants are driven in separate loops and the small one stops at its first refusal. Doing
+    it the other way round -- interleaving them and pushing on -- produced one ``no_arm_available``
+    warning per attempt, so the first thing a reader saw was a wall of 27 identical log lines. The
+    refusal is the point; repeating it 27 times is not.
     """
     # Only digests of these reach the settings; neither is a credential for anything.
     demo_route_key = "demo-route-key"
@@ -401,7 +485,12 @@ def _service_section(environment: SimulatedEnvironment, workdir: Path) -> dict[s
         tenant_budget_usd=1.0,
         tenant_budget_caps={"tenant_small": 0.004},
     )
-    service = build_router_service(settings, seed=_SEED)
+    service = build_router_service(
+        settings,
+        seed=_SEED,
+        workload_digest=environment.workload.digest,
+        simulator_seed=_SEED,
+    )
     verifier = ScopedApiKeyVerifier.from_settings(settings)
     route_principal = verifier.verify(demo_route_key)
     feedback_principal = ScopedPrincipal(key_id="rubric_a", scopes=frozenset({Scope.FEEDBACK}))
@@ -409,11 +498,9 @@ def _service_section(environment: SimulatedEnvironment, workdir: Path) -> dict[s
     if route_principal is None:  # pragma: no cover - the key was just minted from this digest
         raise RuntimeError("demo wiring: the generated route key did not verify")
     pool = environment.workload.pool
-    served = denied = 0
-    decisions: list[str] = []
-    for index in range(120):
+
+    def route_one(index: int, tenant: str) -> str | None:
         request = pool[index]
-        tenant = "tenant_small" if index % 4 == 0 else "tenant_main"
         try:
             response = service.route(
                 RouteRequest(
@@ -425,10 +512,25 @@ def _service_section(environment: SimulatedEnvironment, workdir: Path) -> dict[s
                 principal=route_principal,
             )
         except Exception:  # noqa: BLE001 - budget refusals are the point of this section
-            denied += 1
-            continue
-        served += 1
-        decisions.append(response.decision_id)
+            return None
+        return response.decision_id
+
+    decisions: list[str] = []
+    for index in range(90):
+        decision_id = route_one(index, "tenant_main")
+        if decision_id is not None:
+            decisions.append(decision_id)
+    small_served = 0
+    small_refused_after: int | None = None
+    for index in range(90, 120):
+        decision_id = route_one(index, "tenant_small")
+        if decision_id is None:
+            small_refused_after = small_served
+            break
+        small_served += 1
+        decisions.append(decision_id)
+    served = len(decisions)
+    denied = 0 if small_refused_after is None else 1
     applied = 0
     for position, decision_id in enumerate(decisions[:60]):
         reward = 0.4 + 0.4 * ((position * 7) % 5) / 4.0
@@ -442,9 +544,15 @@ def _service_section(environment: SimulatedEnvironment, workdir: Path) -> dict[s
                 principal=principal,
             )
             applied += 1 if result.applied_to_policy else 0
+    registered_digest = service.register_live_policy(
+        metrics={"policy_updates": float(service.policy.updates)}
+    )
     summary = {
         "requests_served": served,
         "requests_denied_by_budget": denied,
+        "tenant_small_served_before_refusal": small_served,
+        "tenant_small_refused_after_requests": small_refused_after,
+        "live_policy_snapshot_digest": registered_digest[:16],
         "decisions_logged": service.store.count_decisions(),
         "rewards_aggregated": service.store.count_rewards(),
         "policy_updates": service.policy.updates,
@@ -455,6 +563,7 @@ def _service_section(environment: SimulatedEnvironment, workdir: Path) -> dict[s
         },
         "arm_counts": service.store.arm_counts(),
         "registered_policy_versions": len(service.registry.versions(POLICY_MODEL_NAME)),
+        "spend_cap_usd_by_tenant": {"tenant_main": 1.0, "tenant_small": 0.004},
     }
     service.store.close()
     return summary
