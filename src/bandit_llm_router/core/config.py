@@ -111,6 +111,10 @@ class Settings(BaseSettings):
     screening_min_ess: float = Field(default=500.0, gt=0.0)
     screening_horizon_requests: int = Field(default=100_000, ge=1)
     screening_max_exploration_usd: float = Field(default=250.0, gt=0.0)
+    # The service screens on the log its own *learning* policy wrote, so the rows are not i.i.d.
+    # and a bootstrap over single rows would be assuming they are. Resample contiguous blocks
+    # instead; see ope/estimators.py. Set to 1 to opt back into the plain row bootstrap.
+    screening_bootstrap_block_size: int = Field(default=250, ge=1)
     mlflow_dir: Path = Path("var/mlflow")
 
     # --- live provider ---

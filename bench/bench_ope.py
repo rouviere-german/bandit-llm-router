@@ -4,11 +4,17 @@ The simulator knows every arm's expected reward, so a frozen policy's value is c
 rather than estimated. That exact value is the ground truth each estimator is scored against, which
 is what makes "DR is more accurate than IPS here" a measurement instead of an opinion.
 
-Three things this bench is careful about:
+Four things this bench is careful about:
 
-* **The logging policy is frozen.** An online learner's log is not i.i.d., so a bootstrap interval
-  over its rows would not be measuring what it claims to. Freezing costs a short warm-up and makes
-  the reported coverage meaningful.
+* **The accuracy sweeps freeze the logging policy.** An online learner's log is not i.i.d., so a
+  bootstrap interval over its rows would not be measuring what it claims to. Freezing costs a short
+  warm-up and makes the reported coverage meaningful.
+* **The shipped gate does not get to freeze anything, so that case is measured too.**
+  ``RouterService.screen`` evaluates candidates on the log its own learning policy wrote. The last
+  section logs the *same* candidates and seeds twice -- once frozen, once with the logger still
+  updating -- and reports DR coverage under the row bootstrap and under a block bootstrap over
+  contiguous rows. The four numbers say how far the headline coverage above transfers to the
+  governance path.
 * **Coverage is measured, not assumed.** The DR interval is a percentile bootstrap over rows with
     the
   reward model held fixed, so it covers sampling noise in the log but not the reward model's own
@@ -27,17 +33,19 @@ from __future__ import annotations
 
 import argparse
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from typing import Any
 
 import numpy as np
 
 # bench/ is a script directory on sys.path, not an installed package.
-from _common import ROOT, machine, threshold_problems, write_results
+from _common import ROOT, add_common_arguments, machine, threshold_problems, write_results
 from bandit_llm_router.arms import load_catalog
 from bandit_llm_router.experiments import (
+    AdaptiveCoverage,
     CandidateFactory,
     OPEAccuracy,
+    run_adaptive_coverage,
     run_ope_accuracy,
     run_screening_trials,
     run_simulation,
@@ -65,6 +73,20 @@ BOOTSTRAP = 300
 SEEDS = tuple(range(1, 16))
 SCREENING_SEEDS = (1, 2, 3)
 NOMINAL_COVERAGE = 0.95
+# Block length for the adaptive-log bootstrap. It has to be long enough to contain the serial
+# dependence a learner induces and short enough to leave many blocks: at 40,000 rows, 250 leaves
+# 160. This is the value `screening_bootstrap_block_size` ships with, so the bench measures the
+# default rather than a number chosen to look good.
+BLOCK_SIZE = 250
+# One logging run per seed is shared by both bootstraps, so 15 seeds x 4 candidates = 60 trials per
+# cell, the same count as the frozen sweeps above -- the comparison is not between sample sizes.
+ADAPTIVE_SEEDS = tuple(range(1, 16))
+# The adaptive section uses its own, shorter log on purpose and does *not* follow --logs. A LinUCB
+# on this workload has largely converged after a few thousand requests, so in a 40,000-row window
+# most rows are written by a policy that has stopped moving -- which dilutes the very effect being
+# measured. The arm-share drift column reports what is left of it either way, and the threshold
+# `adaptive_setup.online_log_barely_moved` fails the bench if the online log stops being adaptive.
+ADAPTIVE_LOGS = 8_000
 
 
 def learner(
@@ -198,6 +220,38 @@ def accuracy_rows(
     return rows, measurements
 
 
+def adaptive_rows(
+    coverage: Sequence[AdaptiveCoverage],
+) -> tuple[list[dict[str, Any]], dict[str, dict[str, float]]]:
+    rows: list[dict[str, Any]] = []
+    measurements: dict[str, dict[str, float]] = {}
+    for entry in coverage:
+        rows.append(entry.summary_row())
+        regime = entry.logging_regime.replace(" ", "_")
+        block = (
+            "rows" if entry.bootstrap_block_size is None else f"block{entry.bootstrap_block_size}"
+        )
+        measurements[f"adaptive_{regime}_{block}"] = {
+            "abs_bias": round(abs(entry.bias), 4),
+            "rmse": round(entry.rmse, 4),
+            "coverage_shortfall": round(max(0.0, 0.90 - entry.coverage), 4),
+            "coverage_gap": round(abs(entry.coverage - NOMINAL_COVERAGE), 4),
+        }
+    online = [entry for entry in coverage if entry.logging_regime.startswith("online")]
+    frozen = [entry for entry in coverage if entry.logging_regime == "frozen"]
+    if online and frozen:
+        # Without this the whole section could pass while comparing a frozen log with itself.
+        measurements["adaptive_setup"] = {
+            # Twice the frozen regime's own noise floor. That floor is not zero: comparing the
+            # first tenth of a log with the last tenth moves a little on action sampling alone.
+            "online_log_barely_moved": 0.0
+            if min(entry.logging_drift for entry in online)
+            > 2.0 * max(entry.logging_drift for entry in frozen)
+            else 1.0
+        }
+    return rows, measurements
+
+
 def run(*, n_logs: int) -> dict[str, Any]:
     started = time.perf_counter()
     catalog = load_catalog(ROOT / "config" / "pricing.toml")
@@ -261,6 +315,31 @@ def run(*, n_logs: int) -> dict[str, Any]:
         warmup=WARMUP,
         config=screening_config,
     )
+    # What the headline coverage is worth on the log the shipped gate actually screens on. The
+    # logging policy keeps learning, so its rows are serially dependent; both bootstraps are then
+    # run on identical data so the only difference is the resampling scheme.
+    # The online regime starts cold (no warm-up) so the logging policy really is moving while it
+    # writes the rows -- which is both the honest worst case and what screening an early policy
+    # looks like. `arm-share drift` in the table below is how far it moved.
+    adaptive: list[AdaptiveCoverage] = []
+    for learning, warmup, label in ((False, WARMUP, "frozen"), (True, 0, "online learner")):
+        adaptive.extend(
+            run_adaptive_coverage(
+                environment,
+                logger_factory=logger_for(0.05),
+                candidates=candidates(0.05),
+                n_logs=ADAPTIVE_LOGS,
+                seeds=ADAPTIVE_SEEDS,
+                warmup=warmup,
+                bootstrap=BOOTSTRAP,
+                block_sizes=(None, BLOCK_SIZE),
+                learn_while_logging=learning,
+                regime_label=label,
+            )
+        )
+    adaptive_table, adaptive_measurements = adaptive_rows(adaptive)
+    measurements.update(adaptive_measurements)
+
     measurements["screening"] = {
         "rejection_shortfall": round(max(0.0, 0.90 - rejection.rejection_rate), 4),
         "admission_shortfall": round(max(0.0, 0.50 - admission.admission_rate), 4),
@@ -280,6 +359,9 @@ def run(*, n_logs: int) -> dict[str, Any]:
             "workload_digest": workload.digest,
             "environment_digest": environment.digest,
             "nominal_coverage": NOMINAL_COVERAGE,
+            "adaptive_block_size": BLOCK_SIZE,
+            "adaptive_seeds": list(ADAPTIVE_SEEDS),
+            "adaptive_n_logs": ADAPTIVE_LOGS,
         },
         "results": measurements,
         "tables": {
@@ -289,6 +371,7 @@ def run(*, n_logs: int) -> dict[str, Any]:
                 {"sweep": "vs a converged incumbent", **rejection.summary_row()},
                 {"sweep": "vs a stale cost-blind incumbent", **admission.summary_row()},
             ],
+            "adaptive_coverage": adaptive_table,
         },
         "seconds": round(time.perf_counter() - started, 1),
     }
@@ -296,12 +379,12 @@ def run(*, n_logs: int) -> dict[str, Any]:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="off-policy evaluation accuracy benchmark")
-    parser.add_argument("--check", action="store_true", help="enforce bench/thresholds.json")
+    add_common_arguments(parser)
     parser.add_argument("--logs", type=int, default=DEFAULT_LOGS)
     args = parser.parse_args(argv)
 
     payload = run(n_logs=args.logs)
-    write_results("ope.json", payload)
+    write_results("ope.json", payload, reference=args.update_reference)
 
     print(f"# estimator accuracy against the simulator's exact values ({args.logs:,} logged rows)")
     print(f"workload digest {payload['config']['workload_digest'][:16]}")
@@ -318,6 +401,11 @@ def main(argv: list[str] | None = None) -> int:
     )
     print("\n# what screening did with those estimates")
     print(markdown_table(payload["tables"]["screening"]))
+    print(
+        "\n# DR interval coverage when the logging policy keeps learning (the gate's own case), "
+        f"{ADAPTIVE_LOGS:,} rows"
+    )
+    print(markdown_table(payload["tables"]["adaptive_coverage"]))
     print(f"\nmeasured in {payload['seconds']}s on {payload['machine']['cpu_count']} CPUs")
 
     if args.check:

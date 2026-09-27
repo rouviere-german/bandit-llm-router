@@ -408,6 +408,117 @@ def test_dr_intervals_cover_the_truth_at_roughly_the_nominal_rate() -> None:
     assert covered / trials >= 0.85
 
 
+def autocorrelated_log(
+    seed: int, *, n: int = 2_000, rho: float = 0.99, amplitude: float = 0.25
+) -> LoggedBatch:
+    """A log whose per-row estimator terms are serially dependent, not independent.
+
+    The reward *level* follows an AR(1) process in row order, so the sample mean's variance is
+    inflated over the i.i.d. value by the sum of the autocovariances -- which is what a bootstrap
+    over rows cannot see, because resampling rows independently destroys the ordering that carries
+    the dependence. The marginal distribution of a single row is unchanged, which is the point.
+
+    Note what would *not* work as a test: drifting the logging *policy* while the reward stays
+    stationary. Importance weighting is conditionally unbiased, so a drifting propensity changes the
+    variance of each row's term without changing its mean, leaves the autocovariances near zero, and
+    the two bootstraps agree. Dependence in the mean is what the block bootstrap exists for.
+    """
+    rng = np.random.default_rng(seed)
+    features = np.column_stack([np.ones(n), rng.uniform(-1.0, 1.0, size=(n, DIM - 1)) * 0.6])
+    actions = rng.integers(0, N_ARMS, size=n)
+    innovations = rng.normal(0.0, 1.0, size=n)
+    latent = np.empty(n, dtype=np.float64)
+    latent[0] = innovations[0]
+    for index in range(1, n):
+        latent[index] = rho * latent[index - 1] + np.sqrt(1.0 - rho**2) * innovations[index]
+    rewards = np.clip(0.5 + amplitude * latent + rng.normal(0.0, 0.02, size=n), 0.0, 1.0)
+    return LoggedBatch(
+        features=features,
+        actions=actions.astype(np.int64),
+        propensities=np.full(n, 1.0 / N_ARMS),
+        rewards=rewards,
+        n_arms=N_ARMS,
+    )
+
+
+def _width(estimate: Estimate) -> float:
+    return estimate.ci_high - estimate.ci_low
+
+
+def test_the_row_bootstrap_understates_the_interval_on_a_serially_dependent_log() -> None:
+    """The defect the block bootstrap exists for, stated as a number.
+
+    A log written by a learner that was still updating is not i.i.d. in its rows. Resampling rows
+    independently therefore reports an interval that would be right for a frozen logger and is too
+    narrow here. Blocks of contiguous rows keep the dependence inside the resample.
+    """
+    batch = autocorrelated_log(11)
+    matrix = target_matrix(batch.n, (0.3, 0.3, 0.4))
+    q_hat = np.zeros((batch.n, N_ARMS))
+    rows = doubly_robust(batch, matrix, q_hat, bootstrap=400, rng=np.random.default_rng(1))
+    blocks = doubly_robust(
+        batch, matrix, q_hat, bootstrap=400, rng=np.random.default_rng(1), block_size=200
+    )
+    assert _width(blocks) > 4.0 * _width(rows)
+    assert blocks.value == pytest.approx(rows.value)
+
+
+def test_the_block_bootstrap_agrees_with_the_row_bootstrap_when_rows_are_independent() -> None:
+    """It is not a blanket widening: with no serial dependence the two intervals match."""
+    batch, _, _ = synthetic_log(12, n=2_000)
+    matrix = target_matrix(batch.n, (0.3, 0.3, 0.4))
+    q_hat = np.zeros((batch.n, N_ARMS))
+    rows = doubly_robust(batch, matrix, q_hat, bootstrap=400, rng=np.random.default_rng(2))
+    blocks = doubly_robust(
+        batch, matrix, q_hat, bootstrap=400, rng=np.random.default_rng(2), block_size=200
+    )
+    assert _width(blocks) == pytest.approx(_width(rows), rel=0.3)
+
+
+def test_a_block_size_of_one_is_exactly_the_row_bootstrap() -> None:
+    batch, _, _ = synthetic_log(13, n=300)
+    matrix = target_matrix(batch.n, (0.3, 0.3, 0.4))
+    plain = ips(batch, matrix, bootstrap=100, rng=np.random.default_rng(3))
+    unit = ips(batch, matrix, bootstrap=100, rng=np.random.default_rng(3), block_size=1)
+    assert (unit.ci_low, unit.ci_high) == (plain.ci_low, plain.ci_high)
+
+
+def test_every_row_can_be_drawn_by_the_circular_block_bootstrap() -> None:
+    """Wrapping matters: without it the last rows of the log would be systematically under-drawn."""
+    from bandit_llm_router.ope.estimators import _resample_indices
+
+    rng = np.random.default_rng(4)
+    seen: set[int] = set()
+    for _ in range(400):
+        seen.update(int(value) for value in _resample_indices(50, 7, rng))
+    assert seen == set(range(50))
+    assert all(_resample_indices(50, 7, rng).shape == (50,) for _ in range(5))
+
+
+def test_a_block_size_below_one_is_refused() -> None:
+    batch, _, _ = synthetic_log(14, n=200)
+    matrix = target_matrix(batch.n, (0.3, 0.3, 0.4))
+    for call in (
+        lambda: ips(batch, matrix, block_size=0),
+        lambda: snips(batch, matrix, block_size=0),
+        lambda: doubly_robust(batch, matrix, np.zeros((batch.n, N_ARMS)), block_size=0),
+        lambda: evaluate_policy(batch, matrix, block_size=0),
+    ):
+        with pytest.raises(ValueError, match="block_size"):
+            call()
+
+
+def test_the_report_passes_the_block_size_to_all_three_estimators() -> None:
+    batch = autocorrelated_log(15)
+    matrix = target_matrix(batch.n, (0.3, 0.3, 0.4))
+    rows = evaluate_policy(batch, matrix, bootstrap=200, rng=np.random.default_rng(5))
+    blocks = evaluate_policy(
+        batch, matrix, bootstrap=200, rng=np.random.default_rng(5), block_size=200
+    )
+    for method in ("ips", "snips", "dr"):
+        assert _width(getattr(blocks, method)) > _width(getattr(rows, method))
+
+
 def test_a_single_row_has_no_standard_error_to_report() -> None:
     batch = LoggedBatch(
         features=np.ones((1, DIM)),

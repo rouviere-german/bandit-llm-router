@@ -28,6 +28,15 @@ evidence cannot be supplied by the caller), ``propose`` refuses anything the rep
 ``approve`` must come from a different principal, and ``activate`` re-checks the evidence before
 moving the ``active`` alias. Every step is appended to a hash-chained audit log.
 
+The gate's statistical caveat, stated where it happens: the log the service screens on was written
+by the live policy *while that policy was learning*, so its rows are serially dependent. Two things
+follow. The bootstrap behind ``dr_lower_bound`` resamples contiguous blocks of rows rather than
+single rows (``screening_bootstrap_block_size``), and :meth:`RouterService.screen` accepts a
+``policy_step`` window so an operator can screen on a stretch of the log over which the posterior
+barely moved. Neither makes an adaptively collected log i.i.d.; the interval coverage measured in
+``bench/bench_ope.py`` on a *frozen* logging policy does not transfer unchanged to this path, and
+``bench/bench_ope.py`` measures the gap rather than assuming it away (ADR 0008).
+
 One honest caveat about the fallback propensity: redirecting after a failure assumes a provider
 failure is a property of the arm at that moment, independent of the request. If an arm failed
 preferentially on particular contexts, the adjusted propensity would be only approximately right.
@@ -45,7 +54,7 @@ from typing import Annotated, Literal
 
 import numpy as np
 import numpy.typing as npt
-from fastapi import Depends, FastAPI
+from fastapi import Depends, FastAPI, Query
 from prometheus_client import CollectorRegistry
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 
@@ -209,6 +218,12 @@ class RouterService:
     screening: ScreeningConfig
     rng: np.random.Generator
     min_propensity_seen: float = 1.0
+    # Where this instance's traffic comes from, written to every logged row. Both are None in a
+    # deployment fed by real callers and set when a simulator or bench drives the service, which is
+    # the only case where "which workload produced this row" has an answer the service can know.
+    # The decision log is then self-describing: policy version, policy step, workload digest, seed.
+    workload_digest: str | None = None
+    simulator_seed: int | None = None
 
     # --- routing --------------------------------------------------------------------------
 
@@ -270,6 +285,8 @@ class RouterService:
             estimated_cost_micros=int(expected[served.arm_index]),
             ceiling_cost_micros=int(ceilings[served.arm_index]),
             actual_cost_micros=served.committed_micros,
+            workload_digest=self.workload_digest,
+            simulator_seed=self.simulator_seed,
             breaker_adjusted=adjusted or served.fallback_used,
             served_by_fallback=served.fallback_used,
         )
@@ -459,10 +476,32 @@ class RouterService:
             audit_head=self.audit.head,
         )
 
-    def screen(self, snapshot_digest: str, *, limit: int | None = None) -> ScreeningReport:
-        """Screen a registered snapshot against the live policy on the service's own logs."""
+    def screen(
+        self,
+        snapshot_digest: str,
+        *,
+        limit: int | None = None,
+        min_policy_step: int | None = None,
+        max_policy_step: int | None = None,
+    ) -> ScreeningReport:
+        """Screen a registered snapshot against the live policy on the service's own logs.
+
+        ``min_policy_step`` / ``max_policy_step`` narrow the evidence to a window of the live
+        policy's update counter, which is how an operator asks for a stretch of the log over which
+        the logging policy was nearly frozen. See the module docstring for why that matters.
+        """
         candidate = self._candidate_from_registry(snapshot_digest)
-        rows = self.store.fetch_logged_rows(n_arms=len(self.catalog), limit=limit)
+        try:
+            rows = self.store.fetch_logged_rows(
+                n_arms=len(self.catalog),
+                min_policy_step=min_policy_step,
+                max_policy_step=max_policy_step,
+                limit=limit,
+            )
+        except ValueError as exc:
+            raise AppError(
+                409, "insufficient_evidence", "No rewarded decisions match that log window."
+            ) from exc
         expected, ceiling = self.catalog.cost_matrices(rows.input_tokens, rows.max_output_tokens)
         report = screen_candidate(
             rows.batch,
@@ -582,8 +621,16 @@ def build_router_service(
     provider: LLMProvider | None = None,
     catalog: ArmCatalog | None = None,
     seed: int = 0,
+    workload_digest: str | None = None,
+    simulator_seed: int | None = None,
 ) -> RouterService:
-    """Wire a service from settings, creating the data directories it needs."""
+    """Wire a service from settings, creating the data directories it needs.
+
+    ``workload_digest`` and ``simulator_seed`` identify the traffic source and are written to every
+    logged decision. They are meaningful only when a simulator drives the service (the demo and
+    ``bench/bench_router.py`` pass their own); under real callers they stay ``None``, because the
+    service cannot invent an answer.
+    """
     cfg = settings if settings is not None else get_settings()
     arms = catalog if catalog is not None else load_catalog(cfg.pricing_path)
     data_dir = Path(cfg.data_dir)
@@ -656,8 +703,11 @@ def build_router_service(
             min_ess=cfg.screening_min_ess,
             horizon_requests=cfg.screening_horizon_requests,
             max_exploration_usd=cfg.screening_max_exploration_usd,
+            bootstrap_block_size=cfg.screening_bootstrap_block_size,
         ),
         rng=np.random.default_rng(seed),
+        workload_digest=workload_digest,
+        simulator_seed=simulator_seed,
     )
 
 
@@ -705,10 +755,17 @@ def create_router_app(
         return router_service.status()
 
     @app.post("/v1/policies/{snapshot_digest}/screen", response_model=ScreeningReport)
-    async def screen(snapshot_digest: Digest, principal: AdminPrincipal) -> ScreeningReport:
+    async def screen(
+        snapshot_digest: Digest,
+        principal: AdminPrincipal,
+        min_policy_step: Annotated[int | None, Query(ge=0)] = None,
+        max_policy_step: Annotated[int | None, Query(ge=0)] = None,
+    ) -> ScreeningReport:
         """Run OPE screening for a registered snapshot against the live policy."""
         del principal
-        return router_service.screen(snapshot_digest)
+        return router_service.screen(
+            snapshot_digest, min_policy_step=min_policy_step, max_policy_step=max_policy_step
+        )
 
     @app.post("/v1/policies/{snapshot_digest}/propose", response_model=ActivationRecord)
     async def propose(snapshot_digest: Digest, principal: AdminPrincipal) -> ActivationRecord:

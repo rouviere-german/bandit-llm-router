@@ -19,6 +19,7 @@ from pydantic import ValidationError
 
 from bandit_llm_router.feedback import AggregatedReward, FeedbackRow
 from bandit_llm_router.logstore import (
+    _INSERT_DECISION,
     SCHEMA_VERSION,
     DecisionRecord,
     RouterLogStore,
@@ -298,11 +299,59 @@ def test_the_batch_can_be_restricted_to_named_policy_versions(store: RouterLogSt
         store.fetch_logged_rows(n_arms=3, limit=0)
 
 
+def test_the_batch_can_be_restricted_to_a_window_of_policy_steps(store: RouterLogStore) -> None:
+    """Screening a live learner's own log needs a way to ask for a stretch of it, not all of it.
+
+    ``policy_version`` cannot do this job: it hashes configuration only, so every row a learning
+    LinUCB ever wrote carries the same one however far its posteriors have moved. ``policy_step``
+    counts the updates, so a step window is the only handle on "the log while the policy was nearly
+    still".
+    """
+    reward = AggregatedReward(reward=0.5, n_reports=1, n_sources=1, weight=1.0)
+    for step in range(10):
+        store.record_decision(
+            record(f"d{step}", policy_step=step, logged_at=1_700_000_000.0 + step)
+        )
+        store.set_reward(f"d{step}", reward)
+    windowed = store.fetch_logged_rows(n_arms=3, min_policy_step=3, max_policy_step=5)
+    assert windowed.decision_ids == ("d3", "d4", "d5")
+    assert list(windowed.policy_steps) == [3, 4, 5]
+    assert store.fetch_logged_rows(n_arms=3, min_policy_step=8).decision_ids == ("d8", "d9")
+    assert store.fetch_logged_rows(n_arms=3, max_policy_step=1).decision_ids == ("d0", "d1")
+    assert list(store.fetch_logged_rows(n_arms=3).policy_steps) == list(range(10))
+
+
+def test_a_policy_step_window_that_cannot_contain_a_row_is_refused(store: RouterLogStore) -> None:
+    store.record_decision(record("d1", policy_step=4))
+    store.set_reward("d1", AggregatedReward(reward=0.5, n_reports=1, n_sources=1, weight=1.0))
+    with pytest.raises(ValueError, match="min_policy_step"):
+        store.fetch_logged_rows(n_arms=3, min_policy_step=-1)
+    with pytest.raises(ValueError, match="max_policy_step"):
+        store.fetch_logged_rows(n_arms=3, min_policy_step=5, max_policy_step=4)
+    with pytest.raises(ValueError, match="no rewarded decisions"):
+        store.fetch_logged_rows(n_arms=3, min_policy_step=9)
+
+
 def test_an_empty_log_refuses_to_pretend_it_can_evaluate_anything(
     store: RouterLogStore,
 ) -> None:
     with pytest.raises(ValueError, match="no rewarded decisions"):
         store.fetch_logged_rows(n_arms=3)
+
+
+def test_the_insert_statement_has_one_placeholder_per_column(store: RouterLogStore) -> None:
+    """The INSERT is a literal, so something has to keep its arity honest.
+
+    Writing the placeholders out by hand is what lets the statement be a plain string constant
+    instead of dynamic SQL a scanner has to be told to ignore. The cost is that adding a column to
+    ``DecisionRecord`` could leave the statement one short, and DuckDB's error for that is not
+    obvious. This test is that cost paid.
+    """
+    assert _INSERT_DECISION.count("?") == len(record().row())
+    assert _INSERT_DECISION.count("?") == len(store.columns("decisions"))
+    # And it really is the statement the store uses: a row written through it reads back whole.
+    store.record_decision(record("round-trip"))
+    assert store.decision("round-trip") == record("round-trip")
 
 
 def test_the_store_survives_a_reopen(tmp_path: Path) -> None:

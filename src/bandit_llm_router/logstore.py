@@ -113,6 +113,15 @@ CREATE TABLE IF NOT EXISTS rewards (
 )
 """
 _META_DDL = "CREATE TABLE IF NOT EXISTS store_meta (key VARCHAR PRIMARY KEY, value VARCHAR)"
+# Spelled out rather than built from `", ".join(["?"] * n)`. The generated form was identical at
+# runtime but it was *dynamic* SQL as far as a scanner is concerned, so it needed a suppression on
+# every run -- and a suppression on one line of a multi-line call makes bandit also report that the
+# marker matched no finding, which reads like an unresolved issue in a CI log. A literal statement
+# needs no suppression at all. The count is pinned by
+# tests/unit/test_logstore.py::test_the_insert_statement_has_one_placeholder_per_column.
+_INSERT_DECISION: Final = (
+    "INSERT INTO decisions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -123,6 +132,7 @@ class LoggedRows:
     input_tokens: IntArray
     max_output_tokens: IntArray
     decision_ids: tuple[str, ...]
+    policy_steps: IntArray
 
 
 class DecisionRecord(BaseModel):
@@ -258,14 +268,9 @@ class RouterLogStore:
     def record_decisions(self, records: Sequence[DecisionRecord]) -> None:
         if not records:
             return
-        placeholders = ", ".join(["?"] * len(records[0].row()))
         with self._lock:
-            self._connection.executemany(
-                # `placeholders` is "?" repeated len(row()) times; every value is bound as a
-                # parameter below, so no caller text reaches the statement.
-                f"INSERT INTO decisions VALUES ({placeholders})",  # noqa: S608  # nosec B608
-                [record.row() for record in records],
-            )
+            # Every value travels as a bound parameter, so no caller text reaches the statement.
+            self._connection.executemany(_INSERT_DECISION, [record.row() for record in records])
 
     def set_actual_cost(self, decision_id: str, actual_cost_micros: int) -> None:
         if actual_cost_micros < 0:
@@ -415,6 +420,8 @@ class RouterLogStore:
         *,
         n_arms: int,
         policy_versions: Iterable[str] | None = None,
+        min_policy_step: int | None = None,
+        max_policy_step: int | None = None,
         limit: int | None = None,
     ) -> LoggedRows:
         """Join decisions with their aggregated rewards into an OPE batch plus request sizes.
@@ -423,6 +430,13 @@ class RouterLogStore:
         input and output token counts come back too, because screening a *different* policy needs
         the cost of arms that were not taken, and those are recomputed from the catalog rather than
         stored per arm.
+
+        ``min_policy_step`` / ``max_policy_step`` narrow the batch to a window of the live policy's
+        update counter. That is the only handle on "how much did the logging policy move while these
+        rows were written": ``policy_version`` hashes configuration, so a learner keeps one version
+        for its whole life no matter how far its posteriors travel. Rows come back in log order, so
+        the block bootstrap in :mod:`bandit_llm_router.ope.estimators` can treat neighbouring rows
+        as neighbouring in time.
         """
         clauses = ["r.reward IS NOT NULL"]
         params: list[Any] = []
@@ -431,12 +445,22 @@ class RouterLogStore:
             placeholders = ", ".join(["?"] * len(versions))
             clauses.append(f"d.policy_version IN ({placeholders})")
             params.extend(versions)
+        if min_policy_step is not None:
+            if min_policy_step < 0:
+                raise ValueError("min_policy_step must be >= 0")
+            clauses.append("d.policy_step >= ?")
+            params.append(min_policy_step)
+        if max_policy_step is not None:
+            if min_policy_step is not None and max_policy_step < min_policy_step:
+                raise ValueError("max_policy_step must be >= min_policy_step")
+            clauses.append("d.policy_step <= ?")
+            params.append(max_policy_step)
         where = " AND ".join(clauses)
         # `where` is built only from fixed literals plus `?` placeholders; every caller
         # value travels in `params`.
         select = (
             "SELECT d.features, d.arm_index, d.propensity, r.reward, d.input_tokens, "
-            "d.max_output_tokens, d.decision_id "
+            "d.max_output_tokens, d.decision_id, d.policy_step "
             "FROM decisions d JOIN rewards r USING (decision_id)"
         )
         query = f"{select} WHERE {where} ORDER BY d.logged_at, d.decision_id"
@@ -463,4 +487,5 @@ class RouterLogStore:
             input_tokens=np.asarray([int(row[4]) for row in rows], dtype=np.int64),
             max_output_tokens=np.asarray([int(row[5]) for row in rows], dtype=np.int64),
             decision_ids=tuple(str(row[6]) for row in rows),
+            policy_steps=np.asarray([int(row[7]) for row in rows], dtype=np.int64),
         )

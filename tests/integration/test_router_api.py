@@ -82,10 +82,22 @@ def make_settings(tmp_path: Path, **overrides: Any) -> Settings:
     return Settings(_env_file=None, **values)
 
 
-def build(tmp_path: Path, **overrides: Any) -> tuple[RouterService, TestClient, CollectorRegistry]:
+def build(
+    tmp_path: Path,
+    *,
+    workload_digest: str | None = None,
+    simulator_seed: int | None = None,
+    **overrides: Any,
+) -> tuple[RouterService, TestClient, CollectorRegistry]:
     settings = make_settings(tmp_path, **overrides)
     registry = CollectorRegistry()
-    service = build_router_service(settings, registry=registry, seed=5)
+    service = build_router_service(
+        settings,
+        registry=registry,
+        seed=5,
+        workload_digest=workload_digest,
+        simulator_seed=simulator_seed,
+    )
     app = create_router_app(settings, service=service, registry=registry)
     return service, TestClient(app, raise_server_exceptions=False), registry
 
@@ -571,6 +583,101 @@ def test_a_candidate_is_screened_on_the_services_own_logs(
         registry, "router_ope_dr_lower_bound", candidate=service.policy.version
     ) == pytest.approx(report["dr_lower_bound"])
     assert metric(registry, "router_ope_ess", candidate=service.policy.version) > 0.0
+
+
+def test_a_logged_row_identifies_the_traffic_that_produced_it(tmp_path: Path) -> None:
+    """The reproducibility columns have to be populated, not just declared.
+
+    The spec asks for the simulator seed, the workload hash and the policy version in every log row.
+    ``policy_version`` and ``policy_step`` always were; ``workload_digest`` and ``simulator_seed``
+    are only knowable when a simulator drives the service, so they are constructor arguments -- and
+    they stay NULL rather than being faked when nothing supplies them.
+    """
+    service, client, _ = build(
+        tmp_path / "seeded", workload_digest="c0ffee" * 6, simulator_seed=4_242
+    )
+    try:
+        response = client.post(
+            "/v1/route", json={"tenant_id": "t1", "prompt": PROMPTS[0]}, headers=ROUTE_AUTH
+        )
+        assert response.status_code == 200
+        row = service.store.decision(response.json()["decision_id"])
+        assert row is not None
+        assert row.workload_digest == "c0ffee" * 6
+        assert row.simulator_seed == 4_242
+        assert row.policy_version == service.policy.version
+    finally:
+        service.store.close()
+
+    plain, plain_client, _ = build(tmp_path / "plain")
+    try:
+        decision_id = plain_client.post(
+            "/v1/route", json={"tenant_id": "t1", "prompt": PROMPTS[0]}, headers=ROUTE_AUTH
+        ).json()["decision_id"]
+        bare = plain.store.decision(decision_id)
+        assert bare is not None
+        assert bare.workload_digest is None
+        assert bare.simulator_seed is None
+    finally:
+        plain.store.close()
+
+
+def test_screening_can_be_narrowed_to_a_window_of_the_learners_own_log(
+    wired: tuple[RouterService, TestClient, CollectorRegistry],
+) -> None:
+    """The gate runs on a log the live policy wrote *while it was learning*, so it needs a window.
+
+    ``policy_version`` cannot provide one: it hashes hyperparameters, so every row a learning LinUCB
+    writes carries the same version however far the posterior has travelled. ``policy_step`` counts
+    the updates, so an operator can ask for the stretch of the log over which the logging policy was
+    nearly still -- and the report has to say which window it used, because the DR lower bound it
+    carries means something different on 40 steps than on 400.
+    """
+    service, client, _ = wired
+    seed_log(service, client)
+    steps = service.store.fetch_logged_rows(n_arms=len(service.catalog)).policy_steps
+    assert int(steps.max()) > int(steps.min()), "the seeded log must span several policy steps"
+    midpoint = int(steps.min()) + (int(steps.max()) - int(steps.min())) // 2
+    digest = service.register_live_policy()
+
+    whole = client.post(f"/v1/policies/{digest}/screen", headers=ADMIN_AUTH).json()
+    early = client.post(
+        f"/v1/policies/{digest}/screen?max_policy_step={midpoint}", headers=ADMIN_AUTH
+    ).json()
+    assert 0 < early["n"] < whole["n"]
+    assert early["logs_digest"] != whole["logs_digest"]
+    assert early["ess"] < whole["ess"]
+
+    empty = client.post(
+        f"/v1/policies/{digest}/screen?min_policy_step={int(steps.max()) + 1_000}",
+        headers=ADMIN_AUTH,
+    )
+    assert empty.status_code == 409
+    assert empty.json()["error"]["code"] == "insufficient_evidence"
+    assert (
+        client.post(
+            f"/v1/policies/{digest}/screen?min_policy_step=-1", headers=ADMIN_AUTH
+        ).status_code
+        == 422
+    )
+
+
+def test_the_service_screens_with_a_block_bootstrap_because_its_log_is_not_iid(
+    wired: tuple[RouterService, TestClient, CollectorRegistry],
+) -> None:
+    """The bound is computed on adaptively collected rows, and the record has to say so.
+
+    A percentile bootstrap over single rows assumes the rows are independent. They are not: the
+    propensity on row ``i`` depends on the rewards of the rows before it. The service resamples
+    contiguous blocks instead, and because ``ScreeningConfig`` is part of the hashed report, that
+    choice is auditable rather than a hidden default.
+    """
+    service, client, _ = wired
+    assert service.screening.bootstrap_block_size == 250
+    seed_log(service, client)
+    digest = service.register_live_policy()
+    report = client.post(f"/v1/policies/{digest}/screen", headers=ADMIN_AUTH).json()
+    assert report["config"]["bootstrap_block_size"] == 250
 
 
 def test_screening_an_unknown_snapshot_is_a_404(

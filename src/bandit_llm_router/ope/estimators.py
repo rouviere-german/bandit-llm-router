@@ -23,10 +23,19 @@ quietly biases DR toward the reward model; cross-fitting costs one extra fit per
 that failure mode.
 
 Uncertainty is reported two ways: an analytic standard error (a ratio-estimator standard error for
-SNIPS) and a percentile bootstrap over rows. The bootstrap holds ``qhat`` fixed, so the DR interval
-covers sampling noise in the log but not the reward model's own uncertainty; the coverage that
-matters is therefore measured, not assumed -- ``bench/bench_ope.py`` reports empirical 95% coverage
-against the simulator's exact policy values.
+SNIPS) and a percentile bootstrap. The bootstrap holds ``qhat`` fixed, so the DR interval covers
+sampling noise in the log but not the reward model's own uncertainty; the coverage that matters is
+therefore measured, not assumed -- ``bench/bench_ope.py`` reports empirical 95% coverage against the
+simulator's exact policy values.
+
+**Which bootstrap.** Resampling individual rows assumes the rows are independent. That is true of
+a log written by a *frozen* policy and false of one written by a learner that was updating as it
+went: its propensities, and the actions they induce, are serially dependent, so a row bootstrap can
+understate the variance of anything computed from them. Pass ``block_size`` to resample contiguous
+runs of rows instead -- the circular block bootstrap of Politis and Romano, *A Circular
+Block-Resampling Procedure for Stationary Data* (1992). Rows must then be in log order, which is how
+:meth:`bandit_llm_router.logstore.RouterLogStore.fetch_logged_rows` returns them.
+``bench/bench_ope.py`` measures what the choice is worth on a live learner's own log.
 
 :func:`effective_sample_size` is the honest health check on every one of these numbers:
 ``(sum w)^2 / sum w^2``. When the candidate concentrates on actions the log rarely took, ESS
@@ -198,22 +207,55 @@ def _percentile_ci(samples: FloatArray, alpha: float) -> tuple[float, float]:
     return float(low), float(high)
 
 
-def _bootstrap_means(values: FloatArray, bootstrap: int, rng: np.random.Generator) -> FloatArray:
+def _check_block_size(block_size: int | None) -> None:
+    if block_size is not None and block_size < 1:
+        raise ValueError("block_size must be >= 1")
+
+
+def _resample_indices(rows: int, block_size: int | None, rng: np.random.Generator) -> IntArray:
+    """One bootstrap resample of row positions.
+
+    With ``block_size`` unset (or degenerate) this is the ordinary i.i.d. row bootstrap.
+    Otherwise it is the *circular* block bootstrap: draw ``ceil(n / b)`` uniform start positions,
+    take ``b`` consecutive rows from each wrapping at the end, then trim back to ``n``. Wrapping is
+    what keeps every row equally likely to be drawn, which the non-circular version does not.
+    """
+    if block_size is None or block_size <= 1 or block_size >= rows:
+        return np.asarray(rng.integers(0, rows, size=rows), dtype=np.int64)
+    n_blocks = -(-rows // block_size)
+    starts = rng.integers(0, rows, size=n_blocks)
+    offsets = np.arange(block_size, dtype=np.int64)
+    picks = (starts[:, None] + offsets[None, :]) % rows
+    return np.asarray(picks.reshape(-1)[:rows], dtype=np.int64)
+
+
+def _bootstrap_means(
+    values: FloatArray,
+    bootstrap: int,
+    rng: np.random.Generator,
+    *,
+    block_size: int | None = None,
+) -> FloatArray:
     rows = values.shape[0]
     out = np.empty(bootstrap, dtype=np.float64)
     for index in range(bootstrap):
-        picks = rng.integers(0, rows, size=rows)
+        picks = _resample_indices(rows, block_size, rng)
         out[index] = float(values[picks].mean())
     return out
 
 
 def _bootstrap_ratios(
-    numerator: FloatArray, denominator: FloatArray, bootstrap: int, rng: np.random.Generator
+    numerator: FloatArray,
+    denominator: FloatArray,
+    bootstrap: int,
+    rng: np.random.Generator,
+    *,
+    block_size: int | None = None,
 ) -> FloatArray:
     rows = numerator.shape[0]
     out = np.empty(bootstrap, dtype=np.float64)
     for index in range(bootstrap):
-        picks = rng.integers(0, rows, size=rows)
+        picks = _resample_indices(rows, block_size, rng)
         total = float(denominator[picks].sum())
         out[index] = float(numerator[picks].sum()) / total if total > 0.0 else 0.0
     return out
@@ -228,13 +270,16 @@ def _estimate_from_values(
     alpha: float,
     rng: np.random.Generator | None,
     clipped_fraction: float,
+    block_size: int | None = None,
 ) -> Estimate:
     rows = values.shape[0]
     value = float(values.mean())
     std_error = float(values.std(ddof=1) / np.sqrt(rows)) if rows > 1 else 0.0
     if bootstrap > 0:
         generator = rng if rng is not None else np.random.default_rng(0)
-        ci_low, ci_high = _percentile_ci(_bootstrap_means(values, bootstrap, generator), alpha)
+        ci_low, ci_high = _percentile_ci(
+            _bootstrap_means(values, bootstrap, generator, block_size=block_size), alpha
+        )
     else:
         half = 1.959963984540054 * std_error
         ci_low, ci_high = value - half, value + half
@@ -258,8 +303,10 @@ def ips(
     bootstrap: int = DEFAULT_BOOTSTRAP,
     alpha: float = 0.05,
     rng: np.random.Generator | None = None,
+    block_size: int | None = None,
 ) -> Estimate:
     """Inverse propensity scoring."""
+    _check_block_size(block_size)
     weights, clipped = importance_weights(batch, target_probabilities, clip=clip)
     return _estimate_from_values(
         "ips",
@@ -269,6 +316,7 @@ def ips(
         alpha=alpha,
         rng=rng,
         clipped_fraction=clipped,
+        block_size=block_size,
     )
 
 
@@ -280,8 +328,10 @@ def snips(
     bootstrap: int = DEFAULT_BOOTSTRAP,
     alpha: float = 0.05,
     rng: np.random.Generator | None = None,
+    block_size: int | None = None,
 ) -> Estimate:
     """Self-normalized IPS: the same weights, divided by their own sum."""
+    _check_block_size(block_size)
     weights, clipped = importance_weights(batch, target_probabilities, clip=clip)
     numerator = weights * batch.rewards
     total_weight = float(weights.sum())
@@ -295,7 +345,8 @@ def snips(
     if bootstrap > 0:
         generator = rng if rng is not None else np.random.default_rng(0)
         ci_low, ci_high = _percentile_ci(
-            _bootstrap_ratios(numerator, weights, bootstrap, generator), alpha
+            _bootstrap_ratios(numerator, weights, bootstrap, generator, block_size=block_size),
+            alpha,
         )
     else:
         half = 1.959963984540054 * std_error
@@ -366,8 +417,10 @@ def doubly_robust(
     bootstrap: int = DEFAULT_BOOTSTRAP,
     alpha: float = 0.05,
     rng: np.random.Generator | None = None,
+    block_size: int | None = None,
 ) -> Estimate:
     """Doubly robust estimate given cross-fitted reward-model predictions ``q_hat``."""
+    _check_block_size(block_size)
     matrix = _check_target(target_probabilities, batch.n, batch.n_arms)
     model = np.asarray(q_hat, dtype=np.float64)
     if model.shape != matrix.shape:
@@ -386,6 +439,7 @@ def doubly_robust(
         alpha=alpha,
         rng=rng,
         clipped_fraction=clipped,
+        block_size=block_size,
     )
 
 
@@ -424,8 +478,14 @@ def evaluate_policy(
     alpha: float = 0.05,
     rng: np.random.Generator | None = None,
     q_hat: FloatArray | None = None,
+    block_size: int | None = None,
 ) -> OPEReport:
-    """Run all three estimators on one candidate's action probabilities."""
+    """Run all three estimators on one candidate's action probabilities.
+
+    ``block_size`` switches every bootstrap to contiguous blocks of rows; the module docstring says
+    when that is the right choice.
+    """
+    _check_block_size(block_size)
     generator = rng if rng is not None else np.random.default_rng(0)
     matrix = _check_target(target_probabilities, batch.n, batch.n_arms)
     model = (
@@ -434,10 +494,22 @@ def evaluate_policy(
         else CrossFitRidgeRewardModel(ridge=ridge, folds=folds).fit_predict(batch, generator)
     )
     ips_estimate = ips(
-        batch, matrix, clip=clip, bootstrap=bootstrap, alpha=alpha, rng=np.random.default_rng(1)
+        batch,
+        matrix,
+        clip=clip,
+        bootstrap=bootstrap,
+        alpha=alpha,
+        rng=np.random.default_rng(1),
+        block_size=block_size,
     )
     snips_estimate = snips(
-        batch, matrix, clip=clip, bootstrap=bootstrap, alpha=alpha, rng=np.random.default_rng(2)
+        batch,
+        matrix,
+        clip=clip,
+        bootstrap=bootstrap,
+        alpha=alpha,
+        rng=np.random.default_rng(2),
+        block_size=block_size,
     )
     dr_estimate = doubly_robust(
         batch,
@@ -447,6 +519,7 @@ def evaluate_policy(
         bootstrap=bootstrap,
         alpha=alpha,
         rng=np.random.default_rng(3),
+        block_size=block_size,
     )
     return OPEReport(
         ips=ips_estimate,
