@@ -1,0 +1,44 @@
+# Routing arms and their token prices.
+#
+# One entry per arm. `model` must be on the pinned allowlist in
+# src/bandit_llm_router/arms.py; anything else is refused at load time, so a typo or an
+# unreviewed model can never become a routable arm.
+#
+# Prices are USD per million tokens, taken from the Claude API reference bundled with Claude Code
+# (checked 2026-09). tests/unit/test_arms.py asserts they agree with
+# bandit_llm_router.agentic.pricing.PRICES_PER_MTOK, which charges the LLM budget ledger.
+#
+# `expected_output_tokens` is the planning estimate used for the reward's cost term and for
+# reporting. `max_output_tokens` bounds what a single call can cost, and the tenant budget guard
+# reserves that ceiling before the call, so a committed cost can never exceed what was reserved.
+# `fallback_priority` orders the breaker's substitutions: when an arm is open, its traffic goes to
+# the available arm with the lowest priority number.
+
+schema_version = 1
+
+[[arm]]
+name = "haiku"
+model = "claude-haiku-4-5"
+input_usd_per_mtok = 1.00
+output_usd_per_mtok = 5.00
+expected_output_tokens = 320
+max_output_tokens = 1024
+fallback_priority = 1
+
+[[arm]]
+name = "sonnet"
+model = "claude-sonnet-5"
+input_usd_per_mtok = 2.00
+output_usd_per_mtok = 10.00
+expected_output_tokens = 420
+max_output_tokens = 1024
+fallback_priority = 2
+
+[[arm]]
+name = "opus"
+model = "claude-opus-5"
+input_usd_per_mtok = 5.00
+output_usd_per_mtok = 25.00
+expected_output_tokens = 520
+max_output_tokens = 1024
+fallback_priority = 3
