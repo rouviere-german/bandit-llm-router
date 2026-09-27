@@ -125,7 +125,7 @@ class ActivationRecord(BaseModel):
             "dr_lower_bound": self.report.dr_lower_bound,
             "incumbent_dr": self.report.incumbent_dr.value,
             "ess": self.report.ess,
-            "worst_case_usd": self.report.cost.worst_case_horizon_usd,
+            "horizon_usd": self.report.cost.upper_bound_horizon_usd,
             "proposed_by": self.proposed_by,
             "approved_by": self.approved_by,
         }

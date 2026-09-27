@@ -107,8 +107,9 @@ def report(
             "improvement": 0.05,
             "cost": {
                 "expected_usd_per_request": 0.002,
-                "worst_case_usd_per_request": 0.004,
-                "worst_case_horizon_usd": 40.0,
+                "upper_bound_usd_per_request": 0.004,
+                "upper_bound_horizon_usd": 40.0,
+                "dearest_arm_usd_per_request": 0.02,
             },
             "eligible": eligible,
             "reasons": () if eligible else ("dr_lower_bound_does_not_beat_incumbent",),
@@ -367,7 +368,7 @@ def test_the_audit_payload_carries_the_evidence_not_the_prompt(
         "dr_lower_bound",
         "incumbent_dr",
         "ess",
-        "worst_case_usd",
+        "horizon_usd",
         "proposed_by",
         "approved_by",
     }

@@ -178,42 +178,69 @@ def test_a_candidate_whose_worst_case_busts_the_budget_is_rejected() -> None:
         FixedPolicy("incumbent", (0.60, 0.20, 0.20)),
         config=ScreeningConfig(bootstrap=200, min_ess=300.0, max_exploration_usd=1.0),
     )
-    assert "worst_case_cost_exceeds_budget" in report.reasons
+    assert "cost_upper_bound_exceeds_budget" in report.reasons
     assert not report.eligible
-    assert report.cost.worst_case_horizon_usd > 1.0
+    assert report.cost.upper_bound_horizon_usd > 1.0
 
 
-def test_the_cost_bound_prices_the_most_expensive_reachable_arm() -> None:
-    """Any arm with positive probability can be drawn, so the worst case charges the dearest one."""
+def _cost_only(probabilities: tuple[float, ...], **overrides: float) -> CostBound:
+    """The cost bound for one candidate distribution, with the value gates out of the way."""
     batch = make_batch(n=500)
     expected, ceiling = costs(batch)
-    cheap_only = screen_candidate(
+    report = screen_candidate(
         batch,
-        candidate=FixedPolicy("cheap", (1.0, 0.0, 0.0)),
+        candidate=FixedPolicy("candidate", probabilities),
         incumbent=FixedPolicy("incumbent", (0.6, 0.2, 0.2)),
         expected_cost_micros=expected,
         ceiling_cost_micros=ceiling,
-        config=ScreeningConfig(bootstrap=0),
+        config=ScreeningConfig(bootstrap=0, **overrides),
         rng=np.random.default_rng(2),
     )
-    explores = screen_candidate(
-        batch,
-        candidate=FixedPolicy("explores", (0.98, 0.01, 0.01)),
-        incumbent=FixedPolicy("incumbent", (0.6, 0.2, 0.2)),
-        expected_cost_micros=expected,
-        ceiling_cost_micros=ceiling,
-        config=ScreeningConfig(bootstrap=0),
-        rng=np.random.default_rng(2),
+    return report.cost
+
+
+def test_the_cost_bound_separates_candidates_by_how_much_dear_mass_they_carry() -> None:
+    """The gate is per-candidate, so putting mass on the dearest arm has to cost more.
+
+    The failure this pins down: charging "the dearest *reachable* arm" makes every policy with a
+    propensity floor score identically, because a floor leaves every arm reachable. The bound has
+    to be a function of the candidate's distribution, not of the arm set.
+    """
+    floor_only = _cost_only((0.96, 0.02, 0.02))
+    half = _cost_only((0.49, 0.02, 0.49))
+    dear = _cost_only((0.02, 0.02, 0.96))
+    bounds = [
+        floor_only.upper_bound_usd_per_request,
+        half.upper_bound_usd_per_request,
+        dear.upper_bound_usd_per_request,
+    ]
+    assert bounds == sorted(bounds)
+    assert bounds[0] < bounds[-1]
+    # Not a rounding difference: the dearest arm costs 5x the cheapest one here.
+    assert bounds[-1] > 3.0 * bounds[0]
+
+
+def test_the_cost_bound_prices_the_floors_forced_exploration() -> None:
+    """A floor spends a fixed slice of traffic on the dearest arm forever; charge it."""
+    no_floor = _cost_only((1.0, 0.0, 0.0))
+    with_floor = _cost_only((0.96, 0.02, 0.02))
+    assert with_floor.upper_bound_usd_per_request > no_floor.upper_bound_usd_per_request
+
+
+def test_the_cost_bound_is_an_upper_bound_on_the_expected_spend() -> None:
+    """It is a bound, not a second point estimate: it must sit above expected spend and scale."""
+    bound = _cost_only((0.49, 0.02, 0.49))
+    assert bound.upper_bound_usd_per_request > bound.expected_usd_per_request
+    assert bound.upper_bound_horizon_usd == pytest.approx(
+        bound.upper_bound_usd_per_request * ScreeningConfig().horizon_requests
     )
-    # Expected spend barely moves; the worst case jumps to the expensive arm's ceiling.
-    assert explores.cost.expected_usd_per_request == pytest.approx(
-        cheap_only.cost.expected_usd_per_request, rel=0.1
-    )
-    assert explores.cost.worst_case_usd_per_request == pytest.approx(
-        cheap_only.cost.worst_case_usd_per_request * 5.0
-    )
-    assert explores.cost.worst_case_horizon_usd == pytest.approx(
-        explores.cost.worst_case_usd_per_request * explores.config.horizon_requests
+
+
+def test_a_wider_confidence_multiplier_makes_the_bound_more_conservative() -> None:
+    mixed = (0.49, 0.02, 0.49)
+    assert (
+        _cost_only(mixed, cost_bound_z=6.0).upper_bound_horizon_usd
+        > _cost_only(mixed, cost_bound_z=3.0).upper_bound_horizon_usd
     )
 
 
@@ -255,7 +282,7 @@ def test_the_summary_row_carries_the_numbers_a_reviewer_reads() -> None:
         "dr_lower",
         "incumbent_dr",
         "ess",
-        "worst_case_usd",
+        "horizon_usd",
         "eligible",
         "reasons",
     }
@@ -322,11 +349,15 @@ def test_screening_config_is_frozen_and_versioned() -> None:
 
 def test_a_cost_bound_refuses_negative_money() -> None:
     CostBound(
-        expected_usd_per_request=0.1, worst_case_usd_per_request=0.2, worst_case_horizon_usd=20.0
+        expected_usd_per_request=0.1,
+        upper_bound_usd_per_request=0.2,
+        upper_bound_horizon_usd=20.0,
+        dearest_arm_usd_per_request=0.4,
     )
     with pytest.raises(ValidationError):
         CostBound(
             expected_usd_per_request=-0.1,
-            worst_case_usd_per_request=0.2,
-            worst_case_horizon_usd=20.0,
+            upper_bound_usd_per_request=0.2,
+            upper_bound_horizon_usd=20.0,
+            dearest_arm_usd_per_request=0.4,
         )

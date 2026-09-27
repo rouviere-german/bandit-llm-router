@@ -10,10 +10,13 @@ evaluated on logged decisions and must clear three independent gates:
 2. **The log has to support the comparison.** Effective sample size must reach ``min_ess``. A
    candidate that concentrates on actions the log almost never took gets rejected for lack of
    evidence rather than promoted on a handful of highly weighted rows.
-3. **Its worst case has to fit the budget.** Exploration is priced: for every logged context, the
-   most expensive arm the candidate might pick is charged in full, extrapolated to
+3. **Its cost has to fit the budget over a horizon.** Exploration is priced per candidate: every
+   logged context is charged at the arm's *ceiling* price, weighted by the candidate's own action
+   distribution, and a one-sided deviation term is added on top before extrapolating to
    ``horizon_requests``. If that bound exceeds ``max_exploration_usd`` the candidate is rejected
-   however good its estimated value is.
+   however good its estimated value is. See :func:`_cost_bound` for exactly what is and is not
+   guaranteed -- in particular, this is a high-probability bound on total spend, not a supremum,
+   and the supremum is reported alongside it as ``dearest_arm_usd_per_request`` (ADR 0007).
 
 A report is a record, not a recommendation: it carries the candidate's snapshot digest and the
 content digest of the exact log it was computed on. :mod:`bandit_llm_router.activation` will only
@@ -80,6 +83,8 @@ class ScreeningConfig(BaseModel):
     min_improvement: float = Field(default=0.0, ge=0.0, le=1.0)
     horizon_requests: int = Field(default=100_000, ge=1)
     max_exploration_usd: float = Field(default=250.0, gt=0.0)
+    cost_bound_z: float = Field(default=3.0, ge=0.0, le=10.0)
+    bootstrap_block_size: int | None = Field(default=None, ge=1)
 
     def digest_payload(self) -> dict[str, object]:
         return self.model_dump(mode="json")
@@ -112,13 +117,14 @@ class EstimateRecord(BaseModel):
 
 
 class CostBound(BaseModel):
-    """What the candidate would cost per request, expected and worst case."""
+    """Cost per request: expected, a horizon upper bound, and the arm set's own supremum."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     expected_usd_per_request: float = Field(ge=0.0)
-    worst_case_usd_per_request: float = Field(ge=0.0)
-    worst_case_horizon_usd: float = Field(ge=0.0)
+    upper_bound_usd_per_request: float = Field(ge=0.0)
+    upper_bound_horizon_usd: float = Field(ge=0.0)
+    dearest_arm_usd_per_request: float = Field(ge=0.0)
 
 
 class ScreeningReport(BaseModel):
@@ -158,7 +164,7 @@ class ScreeningReport(BaseModel):
             "dr_lower": round(self.dr_lower_bound, 4),
             "incumbent_dr": round(self.incumbent_dr.value, 4),
             "ess": round(self.ess, 1),
-            "worst_case_usd": round(self.cost.worst_case_horizon_usd, 2),
+            "horizon_usd": round(self.cost.upper_bound_horizon_usd, 2),
             "eligible": self.eligible,
             "reasons": ",".join(self.reasons) or "-",
         }
@@ -170,15 +176,42 @@ def _cost_bound(
     ceiling_cost_micros: FloatArray,
     *,
     horizon: int,
+    z: float,
 ) -> CostBound:
+    """Price ``horizon`` requests of this candidate, conservatively but *per candidate*.
+
+    The bound charges every arm at its **ceiling** price (the full ``max_output_tokens``, not the
+    expected output length) and weights those ceilings by the candidate's own action distribution.
+    Over ``horizon`` requests drawn from the same context distribution as the log, total spend at
+    ceiling prices has mean ``horizon * E[mu]`` and variance ``horizon * (E[Var_arm] + Var[mu])``:
+    the arm lottery inside one request plus the spread of the contexts themselves. Adding ``z``
+    standard deviations gives a one-sided bound that holds with high probability under the central
+    limit theorem -- at ``z = 3``, about 1 - 1e-3.
+
+    What this is **not**: a supremum. The absolute worst case is "the dearest arm the candidate can
+    reach, every single request", and that number is reported as ``dearest_arm_usd_per_request`` --
+    but it cannot be the gate, because every policy here applies a propensity floor, so every arm
+    stays reachable and the supremum collapses to the same constant for every candidate. A gate that
+    returns one number for all candidates is not a gate. The runtime guard is what makes spend hard-
+    bounded anyway: :mod:`bandit_llm_router.budgets` reserves each call's ceiling against the
+    tenant's cap *before* the provider is called, so ``spent <= cap`` holds per tenant regardless of
+    what this bound said.
+    """
     expected = float(np.einsum("ij,ij->i", probabilities, expected_cost_micros).mean())
+    row_mean = np.einsum("ij,ij->i", probabilities, ceiling_cost_micros)
+    row_second = np.einsum("ij,ij->i", probabilities, np.square(ceiling_cost_micros))
+    row_variance = np.maximum(row_second - np.square(row_mean), 0.0)
+    mean = float(row_mean.mean())
+    variance_per_request = float(row_variance.mean()) + float(row_mean.var())
+    total = mean * horizon + z * float(np.sqrt(variance_per_request * horizon))
     reachable = probabilities > 0.0
     masked = np.where(reachable, ceiling_cost_micros, -np.inf)
-    worst = float(np.max(masked, axis=1).mean())
+    dearest = float(np.max(masked, axis=1).mean())
     return CostBound(
         expected_usd_per_request=expected / _MICROS_PER_USD,
-        worst_case_usd_per_request=worst / _MICROS_PER_USD,
-        worst_case_horizon_usd=worst * horizon / _MICROS_PER_USD,
+        upper_bound_usd_per_request=total / (horizon * _MICROS_PER_USD),
+        upper_bound_horizon_usd=total / _MICROS_PER_USD,
+        dearest_arm_usd_per_request=dearest / _MICROS_PER_USD,
     )
 
 
@@ -222,6 +255,7 @@ def screen_candidate(
         alpha=settings.alpha,
         rng=generator,
         q_hat=q_hat,
+        block_size=settings.bootstrap_block_size,
     )
     incumbent_report: OPEReport = evaluate_policy(
         batch,
@@ -231,12 +265,14 @@ def screen_candidate(
         alpha=settings.alpha,
         rng=generator,
         q_hat=q_hat,
+        block_size=settings.bootstrap_block_size,
     )
     cost = _cost_bound(
         candidate_probabilities,
         expected_cost_micros,
         ceiling_cost_micros,
         horizon=settings.horizon_requests,
+        z=settings.cost_bound_z,
     )
     dr_lower = candidate_report.dr.ci_low
     improvement = dr_lower - incumbent_report.dr.value
@@ -245,8 +281,8 @@ def screen_candidate(
         reasons.append("dr_lower_bound_does_not_beat_incumbent")
     if candidate_report.dr.ess < settings.min_ess:
         reasons.append("effective_sample_size_below_minimum")
-    if cost.worst_case_horizon_usd > settings.max_exploration_usd:
-        reasons.append("worst_case_cost_exceeds_budget")
+    if cost.upper_bound_horizon_usd > settings.max_exploration_usd:
+        reasons.append("cost_upper_bound_exceeds_budget")
     return ScreeningReport(
         created_at=(clock or datetime.now(UTC)).isoformat(),
         candidate_version=candidate.version,
