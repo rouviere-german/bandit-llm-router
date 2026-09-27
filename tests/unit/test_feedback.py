@@ -221,6 +221,37 @@ def test_a_majority_attacker_wins_and_the_docs_say_so() -> None:
     assert robust_aggregate([*reports, *attackers], policy).reward == 0.0
 
 
+def test_with_two_sources_the_lower_report_wins_so_suppression_beats_inflation() -> None:
+    """The 1-versus-1 tie is not arbitrary: it resolves in a *suppression* attacker's favour.
+
+    Calling it "a tie the aggregator cannot break" understates it. With two sources the cap logic
+    renormalises the weights back to [0.5, 0.5], the lower weighted median lands on the first index,
+    and the smaller of the two values wins every time. So an attacker reporting the floor succeeds,
+    an attacker reporting the ceiling fails, and the operational requirement is *three* independent
+    sources rather than two.
+    """
+    policy = FeedbackPolicy()
+    suppressed = robust_aggregate(
+        [SourceReport("rubric", 0.9), SourceReport("attacker", policy.reward_min)], policy
+    )
+    assert suppressed.reward == pytest.approx(policy.reward_min)
+    assert suppressed.n_sources == 2
+    inflated = robust_aggregate(
+        [SourceReport("rubric", 0.1), SourceReport("attacker", policy.reward_max)], policy
+    )
+    assert inflated.reward == pytest.approx(0.1)
+    # A third honest source restores majority rule, which is why three is the requirement.
+    with_third = robust_aggregate(
+        [
+            SourceReport("rubric", 0.9),
+            SourceReport("product", 0.88),
+            SourceReport("attacker", policy.reward_min),
+        ],
+        policy,
+    )
+    assert with_third.reward == pytest.approx(0.88)
+
+
 # --- bounded scope -------------------------------------------------------------------------------
 
 

@@ -10,10 +10,15 @@ Three measurements the other benches do not cover:
   exploration cost is a design choice, and charging a policy for it would make the target
   unreachable
   for reasons that have nothing to do with learning.
-* **Robustness.** Policy value under adversarial feedback, with no defenses, with clipping only, and
-  with the shipped pipeline (clip, per-source median, weight-capped weighted median, trust
-  weighting).
-  The same poisoned stream drives all three, so the difference is the defenses and nothing else.
+* **Robustness.** Policy value under adversarial feedback, in four configurations: no defenses;
+  clipping only; the full aggregation (clip, per-source median, weight-capped weighted median, trust
+  weighting); and the channel the **online posterior** actually gets, which is the first accepted
+  report for a decision, clipped, at the reduced single-source weight. The same poisoned stream
+  drives all four, so the difference is the defenses and nothing else. The last row is here because
+  the full aggregation protects the *stored* reward -- what OPE and offline retraining read -- while
+  ``RouterService.submit_feedback`` teaches the live policy once per decision, from one report, so
+  the median has nothing to combine. Publishing only the full-pipeline number would overstate what
+  the deployed learner is protected by.
 * **Live-path throughput.** Wall-clock per request through ``RouterService`` on the offline
     provider:
   featurize, decide, restrict, reserve, call, commit, log to DuckDB. Not a model-latency number --
@@ -37,7 +42,7 @@ import numpy as np
 import numpy.typing as npt
 
 # bench/ is a script directory on sys.path, not an installed package.
-from _common import ROOT, machine, threshold_problems, write_results
+from _common import ROOT, add_common_arguments, machine, threshold_problems, write_results
 from bandit_llm_router.arms import load_catalog
 from bandit_llm_router.auth import Scope, ScopedPrincipal, hash_api_key
 from bandit_llm_router.budgets import TenantBudgetGuard
@@ -207,7 +212,8 @@ def run_poisoning(
     ablation: tuple[tuple[AggregationMode, str], ...] = (
         ("none", "none"),
         ("clip_only", "clipping only"),
-        ("robust", "full"),
+        ("robust", "full aggregation (stored reward)"),
+        ("first_report_only", "online posterior (first report, clipped)"),
     )
     for mode, label in ablation:
         result = run_simulation(
@@ -233,8 +239,15 @@ def run_poisoning(
             "value_drop_undefended": round(drops["none"], 4),
             "value_drop_clip_only": round(drops["clip_only"], 4),
             "value_drop_defended": round(drops["robust"], 4),
+            # What the deployed online learner gets, which is weaker than the row above it.
+            "value_drop_online_path": round(drops["first_report_only"], 4),
             # The defenses must actually be worth something.
             "defenses_no_better_than_none": 0.0 if drops["robust"] < drops["none"] else 1.0,
+            # And the honest ordering has to hold: one clipped report cannot beat three
+            # corroborated ones. If this flips, the online row stopped measuring the weaker channel.
+            "online_path_not_weaker_than_full": 0.0
+            if drops["first_report_only"] > drops["robust"]
+            else 1.0,
         }
     }
     return measurements, rows
@@ -254,7 +267,12 @@ def _time_route(
             propensity_floor=FLOOR,
             tenant_budget_usd=10_000.0,
         )
-        service = build_router_service(settings, seed=SEED)
+        service = build_router_service(
+            settings,
+            seed=SEED,
+            workload_digest=environment.workload.digest,
+            simulator_seed=SEED,
+        )
         if not shared_budget_file:
             service.guard = TenantBudgetGuard(service.guard.budgets, path=None)
         principal = ScopedPrincipal(key_id="bench", scopes=frozenset({Scope.ROUTE}))
@@ -355,7 +373,7 @@ def run(*, shift_requests: int, poison_requests: int, service_requests: int) -> 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="router adaptation, robustness and overhead")
-    parser.add_argument("--check", action="store_true", help="enforce bench/thresholds.json")
+    add_common_arguments(parser)
     parser.add_argument("--shift-requests", type=int, default=DEFAULT_SHIFT_REQUESTS)
     parser.add_argument("--poison-requests", type=int, default=DEFAULT_POISON_REQUESTS)
     parser.add_argument("--service-requests", type=int, default=DEFAULT_SERVICE_REQUESTS)
@@ -368,7 +386,7 @@ def main(argv: list[str] | None = None) -> int:
         poison_requests=args.poison_requests,
         service_requests=args.service_requests,
     )
-    write_results("router.json", payload)
+    write_results("router.json", payload, reference=args.update_reference)
 
     print(f"# adaptation after a mid-run shift ({args.shift_requests:,} requests)")
     print(markdown_table(payload["tables"]["adaptation"]))

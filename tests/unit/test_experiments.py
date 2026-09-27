@@ -24,6 +24,7 @@ from bandit_llm_router.experiments import (
     PoisonedFeedbackChannel,
     expected_policy_cost,
     regret_slope,
+    run_adaptive_coverage,
     run_linear_bandit,
     run_ope_accuracy,
     run_screening_trials,
@@ -31,6 +32,7 @@ from bandit_llm_router.experiments import (
     run_simulation,
     true_policy_value,
 )
+from bandit_llm_router.feedback import FeedbackPolicy
 from bandit_llm_router.ope.screening import ScreeningConfig
 from bandit_llm_router.policies.baselines import KeywordRule, StaticArm
 from bandit_llm_router.policies.linear_bandit import (
@@ -418,6 +420,89 @@ def test_screening_rejects_candidates_that_are_genuinely_worse(
     assert row["truly_worse_candidates"] == trials.truly_worse
 
 
+# --- coverage when the logging policy is still learning -------------------------------------------
+
+
+def test_the_adaptive_sweep_compares_two_bootstraps_on_one_log(
+    environment: SimulatedEnvironment,
+) -> None:
+    """Both bootstraps must see the *same* rows, or the comparison measures the log, not the method.
+
+    This is the measurement behind the gate's own statistical caveat: the service screens on a log
+    its learning policy wrote, so the rows are serially dependent. One logging run per seed is
+    shared by every block size on purpose -- if each entry re-logged, the difference between the two
+    coverages would include the difference between two logs.
+    """
+    entries = run_adaptive_coverage(
+        environment,
+        logger_factory=lambda: learner(environment, "epsilon_greedy", epsilon=0.2),
+        candidates={
+            "haiku": lambda env, _seed: static(env, "haiku"),
+            "opus": lambda env, _seed: static(env, "opus"),
+        },
+        n_logs=1_200,
+        seeds=(1, 2),
+        warmup=0,
+        bootstrap=60,
+        block_sizes=(None, 100),
+    )
+    assert [entry.bootstrap_block_size for entry in entries] == [None, 100]
+    for entry in entries:
+        assert entry.logging_regime == "online learner"
+        assert entry.trials == 4
+        assert entry.n_logs == 1_200
+        assert 0.0 <= entry.coverage <= 1.0
+        assert entry.mean_interval_width > 0.0
+        assert entry.rmse >= abs(entry.bias)
+    # Identical data, so the point estimates that drive bias and RMSE cannot differ between the two.
+    assert entries[0].bias == pytest.approx(entries[1].bias)
+    assert entries[0].rmse == pytest.approx(entries[1].rmse)
+    assert entries[0].logging_drift == pytest.approx(entries[1].logging_drift)
+    row = entries[1].summary_row()
+    assert row["bootstrap"] == "blocks of 100"
+    assert row["logged rows"] == 1_200
+    assert entries[0].summary_row()["bootstrap"] == "rows"
+
+
+def test_a_frozen_logger_drifts_less_than_one_that_keeps_learning(
+    environment: SimulatedEnvironment,
+) -> None:
+    """The non-vacuity check on the whole comparison, asserted rather than assumed.
+
+    ``logging_drift`` is the total-variation distance between the first and last tenth of a log's
+    arm shares. A frozen logger still shows some, purely from action sampling; a cold-started
+    learner shows more, because it is genuinely moving. If these ever converged, the bench's "online
+    learner" row would be a frozen log wearing a different label.
+    """
+    common: dict[str, object] = {
+        "logger_factory": lambda: learner(environment, "linucb"),
+        "candidates": {"haiku": lambda env, _seed: static(env, "haiku")},
+        "n_logs": 2_000,
+        "seeds": (1, 2, 3),
+        "bootstrap": 0,
+        "block_sizes": (None,),
+    }
+    frozen = run_adaptive_coverage(environment, warmup=2_000, learn_while_logging=False, **common)  # type: ignore[arg-type]
+    online = run_adaptive_coverage(environment, warmup=0, learn_while_logging=True, **common)  # type: ignore[arg-type]
+    assert frozen[0].logging_regime == "frozen"
+    assert online[0].logging_regime == "online learner"
+    assert online[0].logging_drift > 2.0 * frozen[0].logging_drift
+
+
+def test_the_adaptive_sweep_needs_at_least_one_bootstrap_to_run(
+    environment: SimulatedEnvironment,
+) -> None:
+    with pytest.raises(ValueError, match="at least one block size"):
+        run_adaptive_coverage(
+            environment,
+            logger_factory=lambda: learner(environment),
+            candidates={"haiku": lambda env, _seed: static(env, "haiku")},
+            n_logs=200,
+            seeds=(1,),
+            block_sizes=(),
+        )
+
+
 # --- the poisoning ablation -----------------------------------------------------------------------
 
 
@@ -455,6 +540,56 @@ def test_the_poisoned_channel_clips_and_weights_what_it_reports() -> None:
     raw, raw_weight = undefended.observe(0, 0.9, rng)
     assert raw < -1.0  # the unclipped attacker value reaches the learner
     assert raw_weight == 1.0
+
+
+def test_the_online_learners_channel_is_weaker_than_the_full_aggregation() -> None:
+    """The bench has to measure the defense the *online posterior* gets, not a stronger one.
+
+    ``RouterService.submit_feedback`` teaches the live policy on the first accepted report for a
+    decision and never again. One report means one source, so the per-source median and the
+    weight-capped weighted median never run on that path -- only clipping and the reduced
+    single-source weight do. Publishing the full pipeline's number as "the shipped defense" would
+    therefore overstate what the deployed learner is protected by, so both are measured.
+    """
+    policy = FeedbackPolicy()
+    online = PoisonedFeedbackChannel(attack_rate=1.0, mode="first_report_only")
+    reward, weight = online.observe(0, 0.9, np.random.default_rng(0))
+    # The attacker reports first and its inverted value is clipped, not out-voted.
+    assert reward == pytest.approx(policy.reward_min)
+    assert weight == pytest.approx(policy.single_source_weight)
+
+    honest_first = PoisonedFeedbackChannel(
+        attack_rate=1.0, mode="first_report_only", attacker_reports_first=False
+    )
+    honest_reward, honest_weight = honest_first.observe(0, 0.9, np.random.default_rng(0))
+    assert honest_reward == pytest.approx(0.9, abs=0.3)
+    assert honest_weight == pytest.approx(policy.single_source_weight)
+
+    # With no attack the two modes agree on the honest signal, so the gap above is the attack.
+    quiet = PoisonedFeedbackChannel(attack_rate=0.0, mode="first_report_only")
+    quiet_reward, _ = quiet.observe(0, 0.9, np.random.default_rng(0))
+    assert quiet_reward == pytest.approx(0.9, abs=0.3)
+
+
+def test_the_online_channel_costs_more_policy_value_than_the_full_aggregation(
+    environment: SimulatedEnvironment,
+) -> None:
+    """The gap is not cosmetic: the same attack hurts the online path more."""
+    stream = environment.workload.sample_indices(4_000, np.random.default_rng(22))
+    clean = run_simulation(environment, learner(environment), n=4_000, seed=23, stream=stream)
+    baseline = float(clean.log.decision_values.mean())
+    drops = {}
+    for mode in ("robust", "first_report_only"):
+        result = run_simulation(
+            environment,
+            learner(environment),
+            n=4_000,
+            seed=23,
+            stream=stream,
+            channel=PoisonedFeedbackChannel(attack_rate=0.2, mode=mode),
+        )
+        drops[mode] = baseline - float(result.log.decision_values.mean())
+    assert drops["first_report_only"] > drops["robust"]
 
 
 def test_the_poisoned_channel_validates_its_configuration() -> None:

@@ -20,16 +20,30 @@ and how much it costs. Five controls stack up here, and each is measured rather 
    median is decided by whoever first reaches half the total weight, so a source sitting on the cap
    would own the result no matter how many honest sources disagreed. Below one half, one dishonest
    source among at least two honest ones cannot move the outcome however extreme its values, while a
-   mean would move linearly with them. One honest source against one hostile one is a tie the
-   aggregator cannot break; that is a minimum-source requirement (docs/THREAT_MODEL.md), not
-   something clipping fixes.
+   mean would move linearly with them.
 5. **Trust-weighted learning.** A reward backed by a single source updates the posterior with weight
    ``single_source_weight`` instead of 1. Corroboration buys influence.
 
-What this does *not* do: it cannot recover the truth when the attacker controls a majority of
-sources, and it cannot detect a sophisticated attacker who reports plausible-but-wrong values. Both
-limits are in docs/THREAT_MODEL.md, and ``bench/bench_router.py`` measures what the defenses are
-worth by running the same poisoned stream with them on and off.
+What this does *not* do:
+
+* It cannot recover the truth when the attacker controls a **majority** of sources. That is the
+  median's design, not a bug in this code.
+* With exactly **two** sources the lower report wins, every time. The cap logic renormalises two
+  weights back to ``[0.5, 0.5]``, so the cumulative weight reaches half the total at the first value
+  in sorted order and :func:`weighted_median` returns it. Calling that "a tie the aggregator cannot
+  break" would be too kind: it is a tie broken *downwards*, so a **suppression** attacker -- one
+  reporting ``reward_min`` to starve an arm of traffic -- wins against a single honest source, while
+  an inflation attacker loses. The operational requirement is therefore *three* independent sources,
+  not two. Pinned by ``test_with_two_sources_the_lower_report_wins_so_suppression_beats_inflation``.
+* It cannot detect a sophisticated attacker who reports plausible-but-wrong values inside the range.
+* It does not protect the **online posterior**. ``RouterService.submit_feedback`` teaches the live
+  policy on the first accepted report for a decision, and one report means one source, so item 4
+  and the median never run there: clipping and the reduced ``single_source_weight`` are the online
+  path's whole defense. Everything here protects the *stored* aggregate, which is what off-policy
+  evaluation and offline retraining read. ``bench/bench_router.py`` measures both channels.
+
+All of these are in docs/THREAT_MODEL.md, and ``bench/bench_router.py`` measures what the defenses
+are worth by running the same poisoned stream with them on and off.
 """
 
 from __future__ import annotations
@@ -181,6 +195,10 @@ def weighted_median(values: Sequence[float], weights: Sequence[float]) -> float:
 
     Unlike a weighted mean, moving one input to +/- infinity cannot move the output beyond the next
     value in order, which is exactly the property the poisoning defense needs.
+
+    "Lower" has a direction, and the direction matters at two sources: with weights ``[0.5, 0.5]``
+    the cumulative sum reaches half at the *first* sorted value, so the smaller report wins. Two
+    sources are therefore not a symmetric standoff -- see the module docstring.
     """
     if len(values) != len(weights):
         raise ValueError("values and weights must have the same length")

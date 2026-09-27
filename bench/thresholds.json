@@ -43,7 +43,12 @@
       "admission_shortfall": 0.0,
       "empty_rejection_sweep": 0.0,
       "empty_admission_sweep": 0.0
-    }
+    },
+    "adaptive_frozen_rows": {"abs_bias": 0.01, "rmse": 0.01, "coverage_shortfall": 0.0},
+    "adaptive_frozen_block250": {"abs_bias": 0.01, "rmse": 0.01, "coverage_shortfall": 0.0},
+    "adaptive_online_learner_rows": {"abs_bias": 0.01, "rmse": 0.01, "coverage_shortfall": 0.05},
+    "adaptive_online_learner_block250": {"abs_bias": 0.01, "rmse": 0.01, "coverage_shortfall": 0.05},
+    "adaptive_setup": {"online_log_barely_moved": 0.0}
   },
   "bench_router": {
     "adaptation": {
@@ -57,7 +62,9 @@
     "poisoning": {
       "value_drop_defended": 0.02,
       "value_drop_clip_only": 0.05,
-      "defenses_no_better_than_none": 0.0
+      "value_drop_online_path": 0.05,
+      "defenses_no_better_than_none": 0.0,
+      "online_path_not_weaker_than_full": 0.0
     },
     "route_decision_shared_budget": {"p95_us": 200000, "lost_decisions": 0.0},
     "route_decision_in_memory_budget": {"p95_us": 60000, "lost_decisions": 0.0}

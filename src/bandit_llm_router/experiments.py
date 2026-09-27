@@ -31,9 +31,15 @@ worse
 with
   no defenses, with clipping only, and with the full robust aggregation.
 
-The logging phase of the OPE experiments runs a *frozen* policy on purpose. An online learner's log
-is not i.i.d., so bootstrap intervals over its rows would be measuring something they do not claim
-to measure. Freezing costs a short warm-up and makes the reported coverage meaningful.
+The logging phase of the OPE accuracy experiments runs a *frozen* policy on purpose. An online
+learner's log is not i.i.d., so bootstrap intervals over its rows would be measuring something they
+do not claim to measure. Freezing costs a short warm-up and makes the reported coverage meaningful.
+
+The shipped governance gate does not get that luxury: ``RouterService.screen`` runs on the log the
+live policy wrote while it was learning. :func:`run_adaptive_coverage` measures what that costs --
+the same candidates and seeds, logged once by a frozen policy and once by a learner, with the DR
+interval computed both by the row bootstrap and by a block bootstrap over contiguous rows. The
+degradation is a number in ``bench/results/ope.json``, not a caveat.
 """
 
 from __future__ import annotations
@@ -52,6 +58,7 @@ from bandit_llm_router.policies.base import sample_action_from_uniform
 from bandit_llm_router.simulator.environment import SimulatedEnvironment
 
 __all__ = [
+    "AdaptiveCoverage",
     "AggregationMode",
     "CandidateFactory",
     "DirectFeedbackChannel",
@@ -66,6 +73,7 @@ __all__ = [
     "SimulationResult",
     "expected_policy_cost",
     "regret_slope",
+    "run_adaptive_coverage",
     "run_linear_bandit",
     "run_ope_accuracy",
     "run_screening_trials",
@@ -76,7 +84,7 @@ __all__ = [
 
 FloatArray = npt.NDArray[np.float64]
 IntArray = npt.NDArray[np.int64]
-AggregationMode = Literal["none", "clip_only", "robust"]
+AggregationMode = Literal["none", "clip_only", "robust", "first_report_only"]
 
 
 class SimulationPolicy(Protocol):
@@ -129,8 +137,23 @@ class PoisonedFeedbackChannel:
 
     * ``"none"`` -- the naive implementation: the mean of whatever was reported, unclipped.
     * ``"clip_only"`` -- values clipped into the reward range, then averaged.
-    * ``"robust"`` -- the shipped pipeline: clipping, per-source medians, weight-capped weighted
-      median across sources, and a reduced learning weight for uncorroborated rewards.
+    * ``"robust"`` -- the full aggregation pipeline on *every* report for a decision: clipping,
+      per-source medians, a weight-capped weighted median across sources, and a reduced learning
+      weight for uncorroborated rewards. This is what the **stored** reward looks like -- the one
+      off-policy evaluation and offline retraining read -- and it is what
+      :func:`bandit_llm_router.feedback.robust_aggregate` computes.
+    * ``"first_report_only"`` -- what the **online posterior** actually receives.
+      ``RouterService.submit_feedback`` teaches the live policy on the first accepted report for a
+      decision and never again (an online ridge update cannot be withdrawn, so applying several
+      would double-count one outcome). With one report there is one source, so the per-source median
+      and the weighted median have nothing to combine: the online path's only defenses are clipping
+      and the reduced ``single_source_weight``. ``attacker_reports_first`` decides who wins the race
+      on an attacked decision; it defaults to the attacker, because report arrival order is not
+      something the router controls and an attacker that wants to be first can be.
+
+    ``"robust"`` and ``"first_report_only"`` are therefore both real and they measure different
+    things. Quoting only the first as "the shipped defense" overstates what the deployed online
+    learner is protected by, which is why ``bench/bench_router.py`` publishes both.
     """
 
     attack_rate: float
@@ -138,6 +161,7 @@ class PoisonedFeedbackChannel:
     honest_sources: int = 2
     honest_noise: float = 0.05
     attack_magnitude: float = 50.0
+    attacker_reports_first: bool = True
     policy: FeedbackPolicy = field(default_factory=FeedbackPolicy)
 
     def __post_init__(self) -> None:
@@ -154,9 +178,14 @@ class PoisonedFeedbackChannel:
             SourceReport(f"rubric_{index}", true_reward + float(rng.normal(0.0, self.honest_noise)))
             for index in range(self.honest_sources)
         ]
-        if rng.random() < self.attack_rate:
+        attacked = rng.random() < self.attack_rate
+        if attacked:
             hostile = -self.attack_magnitude if true_reward >= 0.5 else self.attack_magnitude
             reports.append(SourceReport("attacker", hostile))
+        if self.mode == "first_report_only":
+            first = reports[-1] if attacked and self.attacker_reports_first else reports[0]
+            clipped_value, _ = clip_reward(first.reward, self.policy)
+            return clipped_value, self.policy.single_source_weight
         if self.mode == "robust":
             clipped = [
                 SourceReport(item.source, clip_reward(item.reward, self.policy)[0])
@@ -452,12 +481,21 @@ def _logging_run(
     warmup: int,
     n_logs: int,
     seed: int,
+    learn_while_logging: bool = False,
 ) -> tuple[SimulationPolicy, SimulationResult]:
-    """Warm a logging policy up, freeze it, then log ``n_logs`` decisions with it."""
+    """Warm a logging policy up, then log ``n_logs`` decisions with it.
+
+    ``learn_while_logging`` is the difference between the two regimes this repo cares about. False
+    freezes the policy first, so the logged rows are i.i.d. given the context stream and a bootstrap
+    over rows means what it says. True keeps updating, which is what the deployed service's own
+    decision log looks like: every row's propensity depends on the rewards of the rows before it.
+    """
     logger = logger_factory()
     if warmup > 0:
         run_simulation(environment, logger, n=warmup, seed=seed, learn=True)
-    logging_run = run_simulation(environment, logger, n=n_logs, seed=seed + 1, learn=False)
+    logging_run = run_simulation(
+        environment, logger, n=n_logs, seed=seed + 1, learn=learn_while_logging
+    )
     return logger, logging_run
 
 
@@ -534,6 +572,130 @@ def run_ope_accuracy(
         for method in errors
     }
     return accuracy, details
+
+
+def _arm_share_drift(actions: IntArray, n_arms: int) -> float:
+    """Total-variation distance between the first and last tenth of a log's arm shares.
+
+    How much the logging policy moved *while it was logging*. It is the non-vacuity check on any
+    claim about adaptively collected data: if this is near zero the "online" log is a frozen log
+    wearing a different label, and comparing bootstraps on it proves nothing.
+    """
+    rows = int(actions.shape[0])
+    tenth = max(1, rows // 10)
+    first = np.bincount(actions[:tenth], minlength=n_arms) / tenth
+    last = np.bincount(actions[-tenth:], minlength=n_arms) / tenth
+    return 0.5 * float(np.abs(first - last).sum())
+
+
+@dataclass(frozen=True, slots=True)
+class AdaptiveCoverage:
+    """DR interval quality for one (logging regime, bootstrap) pair, scored against exact values."""
+
+    logging_regime: str
+    bootstrap_block_size: int | None
+    coverage: float
+    mean_interval_width: float
+    bias: float
+    rmse: float
+    trials: int
+    logging_drift: float
+    n_logs: int
+
+    def summary_row(self) -> dict[str, object]:
+        block = self.bootstrap_block_size
+        return {
+            "logging policy": self.logging_regime,
+            "logged rows": self.n_logs,
+            "bootstrap": "rows" if block is None else f"blocks of {block}",
+            "dr coverage_95": round(self.coverage, 3),
+            "mean CI width": round(self.mean_interval_width, 4),
+            "bias": round(self.bias, 4),
+            "rmse": round(self.rmse, 4),
+            "arm-share drift": round(self.logging_drift, 3),
+            "trials": self.trials,
+        }
+
+
+def run_adaptive_coverage(
+    environment: SimulatedEnvironment,
+    *,
+    logger_factory: PolicyFactory,
+    candidates: Mapping[str, CandidateFactory],
+    n_logs: int,
+    seeds: Sequence[int],
+    warmup: int = 2_000,
+    bootstrap: int = 200,
+    block_sizes: Sequence[int | None] = (None,),
+    learn_while_logging: bool = True,
+    regime_label: str | None = None,
+) -> list[AdaptiveCoverage]:
+    """What the DR interval is worth when the log was written by a policy that kept learning.
+
+    This is the shipped governance path, not an academic aside: ``RouterService.screen`` evaluates
+    candidates on the live policy's own decision log, and that policy updates on the first accepted
+    reward report for every decision. The rows are therefore serially dependent, and a percentile
+    bootstrap over individual rows is assuming they are not.
+
+    One logging run per seed is shared by every entry in ``block_sizes``, so the row bootstrap and
+    the block bootstrap are compared on *identical* data and the difference can only be the
+    resampling scheme. Returns one :class:`AdaptiveCoverage` per block size.
+    """
+    if not block_sizes:
+        raise ValueError("at least one block size is required")
+    label = regime_label or ("online learner" if learn_while_logging else "frozen")
+    errors: dict[int, list[float]] = {index: [] for index in range(len(block_sizes))}
+    covered: dict[int, list[float]] = {index: [] for index in range(len(block_sizes))}
+    widths: dict[int, list[float]] = {index: [] for index in range(len(block_sizes))}
+    drifts: list[float] = []
+    for seed in seeds:
+        _, logging_run = _logging_run(
+            environment,
+            logger_factory,
+            warmup=warmup,
+            n_logs=n_logs,
+            seed=seed,
+            learn_while_logging=learn_while_logging,
+        )
+        batch = logging_run.log.to_batch(environment)
+        drifts.append(_arm_share_drift(logging_run.log.actions, environment.n_arms))
+        for name, factory in candidates.items():
+            del name
+            candidate = factory(environment, seed)
+            probabilities = candidate.probabilities_matrix(
+                batch.features, np.random.default_rng(seed + 31)
+            )
+            truth = true_policy_value(
+                environment,
+                candidate,
+                logging_run.log.pool_indices,
+                rng=np.random.default_rng(seed + 31),
+            )
+            for index, block_size in enumerate(block_sizes):
+                estimate = evaluate_policy(
+                    batch,
+                    probabilities,
+                    bootstrap=bootstrap,
+                    rng=np.random.default_rng(seed + 57),
+                    block_size=block_size,
+                ).dr
+                errors[index].append(estimate.value - truth)
+                covered[index].append(1.0 if estimate.ci_low <= truth <= estimate.ci_high else 0.0)
+                widths[index].append(estimate.ci_high - estimate.ci_low)
+    return [
+        AdaptiveCoverage(
+            logging_regime=label,
+            bootstrap_block_size=block_size,
+            coverage=float(np.mean(covered[index])),
+            mean_interval_width=float(np.mean(widths[index])),
+            bias=float(np.mean(errors[index])),
+            rmse=float(np.sqrt(np.mean(np.square(errors[index])))),
+            trials=len(errors[index]),
+            logging_drift=float(np.mean(drifts)),
+            n_logs=n_logs,
+        )
+        for index, block_size in enumerate(block_sizes)
+    ]
 
 
 @dataclass(frozen=True, slots=True)
