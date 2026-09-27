@@ -33,7 +33,7 @@ from typing import Any
 import numpy as np
 
 # bench/ is a script directory on sys.path, not an installed package.
-from _common import ROOT, machine, threshold_problems, write_results
+from _common import ROOT, add_common_arguments, machine, threshold_problems, write_results
 from bandit_llm_router.arms import ArmCatalog, load_catalog
 from bandit_llm_router.experiments import (
     SimulationResult,
@@ -218,13 +218,13 @@ def run(*, requests: int, realizable_requests: int) -> dict[str, Any]:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="learning and cost benchmark")
-    parser.add_argument("--check", action="store_true", help="enforce bench/thresholds.json")
+    add_common_arguments(parser)
     parser.add_argument("--requests", type=int, default=DEFAULT_REQUESTS)
     parser.add_argument("--realizable-requests", type=int, default=60_000)
     args = parser.parse_args(argv)
 
     payload = run(requests=args.requests, realizable_requests=args.realizable_requests)
-    write_results("regret.json", payload)
+    write_results("regret.json", payload, reference=args.update_reference)
 
     print(f"# learning over {payload['config']['requests']:,} simulated requests")
     print(f"workload digest {payload['config']['workload_digest'][:16]}")

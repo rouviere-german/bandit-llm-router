@@ -97,7 +97,7 @@ jobs:
         if: always()
         with:
           name: bench-results
-          path: bench/results/latest.json
+          path: bench/results/latest/
           if-no-files-found: ignore
 
   evaluation:
@@ -125,7 +125,7 @@ jobs:
         if: always()
         with:
           name: evaluation-${{ matrix.bench }}
-          path: bench/results/
+          path: bench/results/latest/
           if-no-files-found: ignore
 
   baseline:

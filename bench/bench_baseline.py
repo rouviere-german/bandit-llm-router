@@ -21,7 +21,7 @@ from pathlib import Path
 import numpy as np
 
 # bench/ is a script directory on sys.path, not an installed package.
-from _common import machine, threshold_problems, write_results
+from _common import add_common_arguments, machine, threshold_problems, write_results
 from bandit_llm_router.agentic.audit import AuditLog, verify_file
 from bandit_llm_router.agentic.providers.base import ChatMessage, LLMRequest
 from bandit_llm_router.core.ratelimit import RateLimiter
@@ -102,11 +102,15 @@ def run() -> dict[str, dict[str, float]]:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="baseline micro-benchmarks")
-    parser.add_argument("--check", action="store_true", help="enforce bench/thresholds.json")
+    add_common_arguments(parser)
     args = parser.parse_args(argv)
 
     results = run()
-    write_results("baseline.json", {"machine": machine(), "results": results})
+    write_results(
+        "baseline.json",
+        {"machine": machine(), "results": results},
+        reference=args.update_reference,
+    )
     print("| benchmark | runs | p50 (us) | p95 (us) |")
     print("|---|---:|---:|---:|")
     for name, stats in results.items():

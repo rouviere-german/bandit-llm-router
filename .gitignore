@@ -31,7 +31,8 @@ mlruns/
 *.parquet
 *.npz
 cassettes/*.local.jsonl
-bench/results/latest.json
+# A plain bench run writes here; only bench/results/<name>.json is the committed reference.
+bench/results/latest/
 
 # Editors / OS
 .idea/
