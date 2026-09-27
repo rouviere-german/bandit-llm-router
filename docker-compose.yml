@@ -1,0 +1,45 @@
+# Local stack. Only locally built images; nothing is pulled at runtime besides the pinned bases.
+#
+# With no ANTHROPIC_API_KEY the router serves every arm from the offline FakeProvider, so the whole
+# stack runs with no network egress and no spend. Set the key only to route to real models.
+services:
+  app:
+    build:
+      context: .
+    image: bandit-llm-router:local
+    ports:
+      - "127.0.0.1:8000:8000"
+    environment:
+      APP_ENVIRONMENT: prod
+      APP_LOG_LEVEL: INFO
+      APP_DATA_DIR: /app/var
+      # Comma-separated SHA-256 digests. The four scopes are separate on purpose: routing spends a
+      # tenant's budget, feedback steers what the policy learns, admin proposes and activates
+      # policies, and approve signs off on someone else's activation. Separation of duties in the
+      # activation gate only means something if these are held by different principals.
+      # Generate one with: uv run bandit-llm-router generate-api-key --scope route
+      APP_API_KEY_SHA256: ${APP_API_KEY_SHA256:-}
+      APP_ROUTE_API_KEY_SHA256: ${APP_ROUTE_API_KEY_SHA256:-}
+      APP_FEEDBACK_API_KEY_SHA256: ${APP_FEEDBACK_API_KEY_SHA256:-}
+      APP_ADMIN_API_KEY_SHA256: ${APP_ADMIN_API_KEY_SHA256:-}
+      APP_APPROVER_API_KEY_SHA256: ${APP_APPROVER_API_KEY_SHA256:-}
+      # Unset keeps the router fully offline on the FakeProvider.
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+    read_only: true
+    # The decision log, budget file, activation records and audit chain need a writable path; the
+    # rest of the filesystem stays read-only.
+    volumes:
+      - router-data:/app/var
+    tmpfs:
+      - /tmp:size=16m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 128
+    mem_limit: 256m
+    cpus: 1.0
+    restart: unless-stopped
+
+volumes:
+  router-data:
