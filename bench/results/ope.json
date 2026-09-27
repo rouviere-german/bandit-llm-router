@@ -1,0 +1,247 @@
+{
+  "config": {
+    "bootstrap": 300,
+    "environment_digest": "e24ada0ddfb979aa53fa87601556d415d3d610d9f59d56b61db88d2b5bf35be0",
+    "n_logs": 40000,
+    "nominal_coverage": 0.95,
+    "pool_size": 4096,
+    "seeds": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12,
+      13,
+      14,
+      15
+    ],
+    "warmup": 4000,
+    "workload_digest": "fbd310d8cec763e55b4642a5e9dc324718a2f471bf1fd53d0fac7afc32f488af"
+  },
+  "machine": {
+    "cpu_count": 6,
+    "platform": "Windows-10-10.0.19045-SP0",
+    "processor": "Intel64 Family 6 Model 158 Stepping 10, GenuineIntel",
+    "python": "3.12.14"
+  },
+  "results": {
+    "floor_0.01_dr": {
+      "abs_bias": 0.0003,
+      "coverage_gap": 0.0333,
+      "coverage_shortfall": 0.0,
+      "rmse": 0.0011
+    },
+    "floor_0.01_ips": {
+      "abs_bias": 0.0009,
+      "coverage_gap": 0.0167,
+      "coverage_shortfall": 0.0,
+      "rmse": 0.0059
+    },
+    "floor_0.01_snips": {
+      "abs_bias": 0.0002,
+      "coverage_gap": 0.0167,
+      "coverage_shortfall": 0.0,
+      "rmse": 0.0035
+    },
+    "floor_0.05_dr": {
+      "abs_bias": 0.0001,
+      "coverage_gap": 0.05,
+      "coverage_shortfall": 0.0,
+      "rmse": 0.0007
+    },
+    "floor_0.05_ips": {
+      "abs_bias": 0.0004,
+      "coverage_gap": 0.0333,
+      "coverage_shortfall": 0.0,
+      "rmse": 0.0036
+    },
+    "floor_0.05_snips": {
+      "abs_bias": 0.0001,
+      "coverage_gap": 0.0,
+      "coverage_shortfall": 0.0,
+      "rmse": 0.0022
+    },
+    "screening": {
+      "admission_shortfall": 0.0,
+      "empty_admission_sweep": 0.0,
+      "empty_rejection_sweep": 0.0,
+      "rejection_shortfall": 0.0
+    }
+  },
+  "seconds": 153.7,
+  "tables": {
+    "accuracy": [
+      {
+        "bias": -0.0004,
+        "coverage_95": 0.983,
+        "estimator": "ips",
+        "logging_floor": "floor_0.05",
+        "mean_ess": 15345.6,
+        "rmse": 0.0036,
+        "trials": 60
+      },
+      {
+        "bias": 0.0001,
+        "coverage_95": 0.95,
+        "estimator": "snips",
+        "logging_floor": "floor_0.05",
+        "mean_ess": 15345.6,
+        "rmse": 0.0022,
+        "trials": 60
+      },
+      {
+        "bias": -0.0001,
+        "coverage_95": 1.0,
+        "estimator": "dr",
+        "logging_floor": "floor_0.05",
+        "mean_ess": 15345.6,
+        "rmse": 0.0007,
+        "trials": 60
+      },
+      {
+        "bias": -0.0009,
+        "coverage_95": 0.967,
+        "estimator": "ips",
+        "logging_floor": "floor_0.01",
+        "mean_ess": 9857.2,
+        "rmse": 0.0059,
+        "trials": 60
+      },
+      {
+        "bias": -0.0002,
+        "coverage_95": 0.933,
+        "estimator": "snips",
+        "logging_floor": "floor_0.01",
+        "mean_ess": 9857.2,
+        "rmse": 0.0035,
+        "trials": 60
+      },
+      {
+        "bias": -0.0003,
+        "coverage_95": 0.983,
+        "estimator": "dr",
+        "logging_floor": "floor_0.01",
+        "mean_ess": 9857.2,
+        "rmse": 0.0011,
+        "trials": 60
+      }
+    ],
+    "dr_detail": [
+      {
+        "candidate": "always_haiku",
+        "ci_high": 0.6343,
+        "ci_low": 0.6287,
+        "ess": 20471.7,
+        "estimate": 0.6315,
+        "estimator": "dr",
+        "logging_floor": "floor_0.05",
+        "seed": 1,
+        "truth": 0.6323
+      },
+      {
+        "candidate": "always_opus",
+        "ci_high": 0.4201,
+        "ci_low": 0.4155,
+        "ess": 3929.6,
+        "estimate": 0.4177,
+        "estimator": "dr",
+        "logging_floor": "floor_0.05",
+        "seed": 1,
+        "truth": 0.4181
+      },
+      {
+        "candidate": "keyword_rule",
+        "ci_high": 0.6183,
+        "ci_low": 0.6119,
+        "ess": 8790.2,
+        "estimate": 0.615,
+        "estimator": "dr",
+        "logging_floor": "floor_0.05",
+        "seed": 1,
+        "truth": 0.6166
+      },
+      {
+        "candidate": "trained_thompson",
+        "ci_high": 0.6364,
+        "ci_low": 0.6312,
+        "ess": 28513.0,
+        "estimate": 0.6338,
+        "estimator": "dr",
+        "logging_floor": "floor_0.05",
+        "seed": 1,
+        "truth": 0.6345
+      },
+      {
+        "candidate": "always_haiku",
+        "ci_high": 0.6477,
+        "ci_low": 0.6414,
+        "ess": 13281.9,
+        "estimate": 0.6444,
+        "estimator": "dr",
+        "logging_floor": "floor_0.01",
+        "seed": 1,
+        "truth": 0.6448
+      },
+      {
+        "candidate": "always_opus",
+        "ci_high": 0.4026,
+        "ci_low": 0.396,
+        "ess": 1768.8,
+        "estimate": 0.3994,
+        "estimator": "dr",
+        "logging_floor": "floor_0.01",
+        "seed": 1,
+        "truth": 0.4003
+      },
+      {
+        "candidate": "keyword_rule",
+        "ci_high": 0.6309,
+        "ci_low": 0.6233,
+        "ess": 4371.9,
+        "estimate": 0.627,
+        "estimator": "dr",
+        "logging_floor": "floor_0.01",
+        "seed": 1,
+        "truth": 0.6269
+      },
+      {
+        "candidate": "trained_thompson",
+        "ci_high": 0.6471,
+        "ci_low": 0.642,
+        "ess": 19812.5,
+        "estimate": 0.6446,
+        "estimator": "dr",
+        "logging_floor": "floor_0.01",
+        "seed": 1,
+        "truth": 0.6457
+      }
+    ],
+    "screening": [
+      {
+        "admission_rate": 0.0,
+        "admitted": 0,
+        "rejected": 9,
+        "rejection_rate": 1.0,
+        "sweep": "vs a converged incumbent",
+        "truly_better_candidates": 0,
+        "truly_worse_candidates": 9
+      },
+      {
+        "admission_rate": 1.0,
+        "admitted": 9,
+        "rejected": 0,
+        "rejection_rate": 0.0,
+        "sweep": "vs a stale cost-blind incumbent",
+        "truly_better_candidates": 9,
+        "truly_worse_candidates": 0
+      }
+    ]
+  }
+}

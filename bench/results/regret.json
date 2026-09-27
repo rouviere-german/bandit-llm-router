@@ -1,0 +1,256 @@
+{
+  "config": {
+    "environment_digest": "37e0003411c3397ffc67016d06cecea88b75a0d4ef258ffcee4287a727c6acf8",
+    "featurizer_version": "ctx-v1-7e407b94a370",
+    "pool_size": 8192,
+    "propensity_floor": 0.02,
+    "realizable_requests": 60000,
+    "requests": 200000,
+    "seed": 20260927,
+    "workload_digest": "0224abab08862332128bb92538fddf8223c2d37967303f2639a8ad542b8d6337"
+  },
+  "machine": {
+    "cpu_count": 6,
+    "platform": "Windows-10-10.0.19045-SP0",
+    "processor": "Intel64 Family 6 Model 158 Stepping 10, GenuineIntel",
+    "python": "3.12.14"
+  },
+  "results": {
+    "realizable_epsilon_greedy": {
+      "regret": 311.64,
+      "regret_slope": 0.8758
+    },
+    "realizable_linucb": {
+      "regret": 10.29,
+      "regret_slope": 0.094
+    },
+    "realizable_static_a": {
+      "regret": 7258.33,
+      "regret_slope": 0.9957
+    },
+    "realizable_thompson": {
+      "regret": 43.83,
+      "regret_slope": 0.163
+    },
+    "simulator_epsilon_greedy": {
+      "in_class_slope": 0.9379,
+      "mean_reward": 0.6454,
+      "oracle_slope": 0.9725,
+      "quality_shortfall_vs_sonnet": 0.0006,
+      "saving_shortfall_vs_sonnet": 0.0,
+      "usd_per_1k_requests": 2.9547
+    },
+    "simulator_haiku": {
+      "in_class_slope": 1.0042,
+      "mean_reward": 0.6416,
+      "oracle_slope": 0.9989,
+      "quality_shortfall_vs_sonnet": 0.0365,
+      "saving_shortfall_vs_sonnet": 0.0,
+      "usd_per_1k_requests": 2.0535
+    },
+    "simulator_keyword_rule": {
+      "in_class_slope": 0.9956,
+      "mean_reward": 0.6235,
+      "oracle_slope": 0.9963,
+      "quality_shortfall_vs_sonnet": 0.0,
+      "saving_shortfall_vs_sonnet": 0.2333,
+      "usd_per_1k_requests": 4.3383
+    },
+    "simulator_linucb": {
+      "in_class_slope": 0.7663,
+      "mean_reward": 0.6508,
+      "oracle_slope": 0.9564,
+      "quality_shortfall_vs_sonnet": 0.0,
+      "saving_shortfall_vs_sonnet": 0.0,
+      "usd_per_1k_requests": 2.9516
+    },
+    "simulator_opus": {
+      "in_class_slope": 0.9991,
+      "mean_reward": 0.4048,
+      "oracle_slope": 0.9992,
+      "quality_shortfall_vs_sonnet": 0.0,
+      "saving_shortfall_vs_sonnet": 2.1774,
+      "usd_per_1k_requests": 13.375
+    },
+    "simulator_sonnet": {
+      "in_class_slope": 0.9983,
+      "mean_reward": 0.5851,
+      "oracle_slope": 0.9985,
+      "quality_shortfall_vs_sonnet": 0.0,
+      "saving_shortfall_vs_sonnet": 0.3,
+      "usd_per_1k_requests": 4.6483
+    },
+    "simulator_thompson": {
+      "in_class_slope": 0.5977,
+      "mean_reward": 0.6497,
+      "oracle_slope": 0.8823,
+      "quality_shortfall_vs_sonnet": 0.0003,
+      "saving_shortfall_vs_sonnet": 0.0,
+      "usd_per_1k_requests": 2.8402
+    }
+  },
+  "seconds": 114.4,
+  "tables": {
+    "realizable": [
+      {
+        "n": 60000,
+        "policy": "linucb",
+        "regret": 10.3,
+        "regret_slope": 0.094
+      },
+      {
+        "n": 60000,
+        "policy": "thompson",
+        "regret": 43.8,
+        "regret_slope": 0.163
+      },
+      {
+        "n": 60000,
+        "policy": "epsilon_greedy",
+        "regret": 311.6,
+        "regret_slope": 0.876
+      },
+      {
+        "n": 60000,
+        "policy": "static_a",
+        "regret": 7258.3,
+        "regret_slope": 0.996
+      }
+    ],
+    "simulator": [
+      {
+        "arm_shares": [
+          0.824,
+          0.102,
+          0.074
+        ],
+        "in_class_regret": 468.0,
+        "in_class_slope": 0.766,
+        "mean_quality": 0.7556,
+        "mean_reward": 0.6508,
+        "min_propensity": 0.02,
+        "oracle_regret": 2877.1,
+        "oracle_slope": 0.956,
+        "policy": "linucb",
+        "quality_delta_vs_sonnet": 0.0048,
+        "saving_vs_opus": 0.779,
+        "saving_vs_sonnet": 0.365,
+        "usd_per_1k_requests": 2.952
+      },
+      {
+        "arm_shares": [
+          0.833,
+          0.101,
+          0.065
+        ],
+        "in_class_regret": 702.2,
+        "in_class_slope": 0.598,
+        "mean_quality": 0.7506,
+        "mean_reward": 0.6497,
+        "min_propensity": 0.02,
+        "oracle_regret": 3099.2,
+        "oracle_slope": 0.882,
+        "policy": "thompson",
+        "quality_delta_vs_sonnet": -0.0003,
+        "saving_vs_opus": 0.788,
+        "saving_vs_sonnet": 0.389,
+        "usd_per_1k_requests": 2.84
+      },
+      {
+        "arm_shares": [
+          0.821,
+          0.104,
+          0.074
+        ],
+        "in_class_regret": 1541.8,
+        "in_class_slope": 0.938,
+        "mean_quality": 0.7503,
+        "mean_reward": 0.6454,
+        "min_propensity": 0.0357,
+        "oracle_regret": 3944.1,
+        "oracle_slope": 0.973,
+        "policy": "epsilon_greedy",
+        "quality_delta_vs_sonnet": -0.0006,
+        "saving_vs_opus": 0.779,
+        "saving_vs_sonnet": 0.364,
+        "usd_per_1k_requests": 2.955
+      },
+      {
+        "arm_shares": [
+          0.589,
+          0.261,
+          0.151
+        ],
+        "in_class_regret": 6797.3,
+        "in_class_slope": 0.996,
+        "mean_quality": 0.7782,
+        "mean_reward": 0.6235,
+        "min_propensity": 0.02,
+        "oracle_regret": 8324.9,
+        "oracle_slope": 0.996,
+        "policy": "keyword_rule",
+        "quality_delta_vs_sonnet": 0.0273,
+        "saving_vs_opus": 0.676,
+        "saving_vs_sonnet": 0.067,
+        "usd_per_1k_requests": 4.338
+      },
+      {
+        "arm_shares": [
+          0.96,
+          0.02,
+          0.02
+        ],
+        "in_class_regret": 2299.5,
+        "in_class_slope": 1.004,
+        "mean_quality": 0.7144,
+        "mean_reward": 0.6416,
+        "min_propensity": 0.02,
+        "oracle_regret": 4718.4,
+        "oracle_slope": 0.999,
+        "policy": "haiku",
+        "quality_delta_vs_sonnet": -0.0365,
+        "saving_vs_opus": 0.846,
+        "saving_vs_sonnet": 0.558,
+        "usd_per_1k_requests": 2.053
+      },
+      {
+        "arm_shares": [
+          0.02,
+          0.96,
+          0.02
+        ],
+        "in_class_regret": 14498.1,
+        "in_class_slope": 0.998,
+        "mean_quality": 0.7509,
+        "mean_reward": 0.5851,
+        "min_propensity": 0.02,
+        "oracle_regret": 16001.2,
+        "oracle_slope": 0.998,
+        "policy": "sonnet",
+        "quality_delta_vs_sonnet": 0.0,
+        "saving_vs_opus": 0.652,
+        "saving_vs_sonnet": 0.0,
+        "usd_per_1k_requests": 4.648
+      },
+      {
+        "arm_shares": [
+          0.02,
+          0.02,
+          0.96
+        ],
+        "in_class_regret": 50032.2,
+        "in_class_slope": 0.999,
+        "mean_quality": 0.873,
+        "mean_reward": 0.4048,
+        "min_propensity": 0.02,
+        "oracle_regret": 52048.5,
+        "oracle_slope": 0.999,
+        "policy": "opus",
+        "quality_delta_vs_sonnet": 0.1221,
+        "saving_vs_opus": 0.0,
+        "saving_vs_sonnet": -1.877,
+        "usd_per_1k_requests": 13.375
+      }
+    ]
+  }
+}

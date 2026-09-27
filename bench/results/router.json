@@ -1,0 +1,125 @@
+{
+  "config": {
+    "attack_rate": 0.1,
+    "environment_digest": "e24ada0ddfb979aa53fa87601556d415d3d610d9f59d56b61db88d2b5bf35be0",
+    "poison_requests": 40000,
+    "propensity_floor": 0.02,
+    "recovery_target": 0.95,
+    "service_requests": 2000,
+    "shift_requests": 120000,
+    "workload_digest": "fbd310d8cec763e55b4642a5e9dc324718a2f471bf1fd53d0fac7afc32f488af"
+  },
+  "machine": {
+    "cpu_count": 6,
+    "platform": "Windows-10-10.0.19045-SP0",
+    "processor": "Intel64 Family 6 Model 158 Stepping 10, GenuineIntel",
+    "python": "3.12.14"
+  },
+  "results": {
+    "adaptation": {
+      "discounted_never_recovered": 0.0,
+      "discounted_recovery_requests": 0.0,
+      "discounted_slower_than_stationary": 0.0,
+      "stationary_never_recovered": 0.0,
+      "trough_depth_stationary": 0.4213,
+      "trough_shortfall_stationary": 0.0
+    },
+    "poisoning": {
+      "defenses_no_better_than_none": 0.0,
+      "value_drop_clip_only": 0.0002,
+      "value_drop_defended": 0.0001,
+      "value_drop_undefended": 0.2327
+    },
+    "route_decision_in_memory_budget": {
+      "lost_decisions": 0.0,
+      "p95_us": 12129.4
+    },
+    "route_decision_shared_budget": {
+      "lost_decisions": 0.0,
+      "p95_us": 34519.3
+    }
+  },
+  "seconds": 151.5,
+  "tables": {
+    "adaptation": [
+      {
+        "discount": 1.0,
+        "final_ratio": 0.9973,
+        "policy": "stationary",
+        "pre_shift_ratio": 0.9969,
+        "requests_to_recover": 19851,
+        "trough_ratio": 0.5755
+      },
+      {
+        "discount": 0.999,
+        "final_ratio": 0.998,
+        "policy": "discounted_0.999",
+        "pre_shift_ratio": 0.9895,
+        "requests_to_recover": "never fell below target",
+        "trough_ratio": 0.9766
+      },
+      {
+        "discount": 0.9995,
+        "final_ratio": 0.9982,
+        "policy": "discounted_0.9995",
+        "pre_shift_ratio": 0.9928,
+        "requests_to_recover": "never fell below target",
+        "trough_ratio": 0.9684
+      }
+    ],
+    "poisoning": [
+      {
+        "defenses": "n/a",
+        "feedback": "honest only",
+        "mean_decision_value": 0.6495,
+        "value_drop": 0.0
+      },
+      {
+        "defenses": "none",
+        "feedback": "10% adversarial",
+        "mean_decision_value": 0.4168,
+        "value_drop": 0.2327
+      },
+      {
+        "defenses": "clipping only",
+        "feedback": "10% adversarial",
+        "mean_decision_value": 0.6493,
+        "value_drop": 0.0002
+      },
+      {
+        "defenses": "full",
+        "feedback": "10% adversarial",
+        "mean_decision_value": 0.6494,
+        "value_drop": 0.0001
+      }
+    ],
+    "service": [
+      {
+        "arm_counts": [
+          "haiku=643",
+          "opus=661",
+          "sonnet=696"
+        ],
+        "budget guard": "shared budget file",
+        "decisions_logged": 2000,
+        "p50_us": 25347.6,
+        "p95_us": 34519.3,
+        "p99_us": 47807.3,
+        "requests": 2000
+      },
+      {
+        "arm_counts": [
+          "haiku=643",
+          "opus=661",
+          "sonnet=696"
+        ],
+        "budget guard": "in-memory budget guard",
+        "decisions_logged": 2000,
+        "p50_us": 6091.8,
+        "p95_us": 12129.4,
+        "p99_us": 29459.1,
+        "requests": 2000
+      }
+    ]
+  }
+}

@@ -1,0 +1,65 @@
+{
+  "_comment": [
+    "Regression thresholds, all one-sided upper bounds, checked by each bench's --check flag in CI.",
+    "Values are several times the locally measured number (or, for flags, exactly zero) because",
+    "shared CI runners are noisy: these catch a broken invariant or an order-of-magnitude drift, not",
+    "a few percent. Metrics that must stay HIGH are recorded as the shortfall below their target, so",
+    "every comparison in _common.py runs the same direction. The measured values these were set from",
+    "are in the README's Results section, with the machine they were measured on."
+  ],
+  "bench_baseline": {
+    "redact_text_1kb": {"p95_us": 3000},
+    "rate_limiter_check": {"p95_us": 50},
+    "llm_request_sha256_10_messages": {"p95_us": 2000},
+    "audit_append_fsync": {"p95_us": 50000},
+    "audit_verify_1000_entries": {"p95_us": 400000},
+    "drift_check_10k_vs_10k": {"p95_us": 40000}
+  },
+  "bench_regret": {
+    "simulator_linucb": {
+      "in_class_slope": 0.8,
+      "saving_shortfall_vs_sonnet": 0.0,
+      "quality_shortfall_vs_sonnet": 0.01
+    },
+    "simulator_thompson": {
+      "in_class_slope": 0.8,
+      "saving_shortfall_vs_sonnet": 0.0,
+      "quality_shortfall_vs_sonnet": 0.01
+    },
+    "simulator_keyword_rule": {"saving_shortfall_vs_sonnet": 0.35},
+    "realizable_linucb": {"regret_slope": 0.5},
+    "realizable_thompson": {"regret_slope": 0.6},
+    "realizable_static_a": {"regret_slope": 1.05}
+  },
+  "bench_ope": {
+    "floor_0.05_ips": {"abs_bias": 0.01, "rmse": 0.02, "coverage_shortfall": 0.0, "coverage_gap": 0.1},
+    "floor_0.05_snips": {"abs_bias": 0.01, "rmse": 0.02, "coverage_shortfall": 0.0, "coverage_gap": 0.1},
+    "floor_0.05_dr": {"abs_bias": 0.01, "rmse": 0.01, "coverage_shortfall": 0.0, "coverage_gap": 0.1},
+    "floor_0.01_ips": {"abs_bias": 0.01, "rmse": 0.03, "coverage_shortfall": 0.0, "coverage_gap": 0.1},
+    "floor_0.01_snips": {"abs_bias": 0.01, "rmse": 0.02, "coverage_shortfall": 0.0, "coverage_gap": 0.1},
+    "floor_0.01_dr": {"abs_bias": 0.01, "rmse": 0.01, "coverage_shortfall": 0.0, "coverage_gap": 0.1},
+    "screening": {
+      "rejection_shortfall": 0.0,
+      "admission_shortfall": 0.0,
+      "empty_rejection_sweep": 0.0,
+      "empty_admission_sweep": 0.0
+    }
+  },
+  "bench_router": {
+    "adaptation": {
+      "stationary_never_recovered": 0.0,
+      "discounted_never_recovered": 0.0,
+      "discounted_recovery_requests": 12000.0,
+      "discounted_slower_than_stationary": 0.0,
+      "trough_depth_stationary": 1.0,
+      "trough_shortfall_stationary": 0.0
+    },
+    "poisoning": {
+      "value_drop_defended": 0.02,
+      "value_drop_clip_only": 0.05,
+      "defenses_no_better_than_none": 0.0
+    },
+    "route_decision_shared_budget": {"p95_us": 200000, "lost_decisions": 0.0},
+    "route_decision_in_memory_budget": {"p95_us": 60000, "lost_decisions": 0.0}
+  }
+}
