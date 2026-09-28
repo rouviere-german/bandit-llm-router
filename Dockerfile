@@ -33,8 +33,18 @@ ENV PATH="/opt/venv/bin:${PATH}" \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     APP_HOST=0.0.0.0 \
-    APP_PORT=8000
+    APP_PORT=8000 \
+    APP_DATA_DIR=/app/var \
+    APP_MLFLOW_DIR=/app/var/mlflow \
+    APP_PRICING_PATH=/app/config/pricing.toml
 WORKDIR /app
+# The arm catalog lives outside the package, so it ships as data: read-only, owned by root, and
+# pointed at by an absolute APP_PRICING_PATH rather than the settings default (a path relative to
+# the working directory). Without this the service cannot build its arms and exits on startup.
+# The directory is created first and explicitly: letting COPY create it would apply --chmod to the
+# directory too, and a 0444 directory cannot be traversed by the non-root runtime user.
+RUN install --directory --owner=root --group=root --mode=0555 /app/config
+COPY --chown=root:root --chmod=0444 config/pricing.toml /app/config/pricing.toml
 # The service writes its decision log (DuckDB), tenant budget file, activation records and audit
 # chain under APP_DATA_DIR. The root filesystem runs read-only, so that directory has to be a mount;
 # creating it here, owned by the runtime user, makes Docker chown a fresh named volume to match.
