@@ -229,12 +229,18 @@ jobs:
       - name: container smoke test (HEALTHCHECK reports healthy)
         run: |
           # /app/var holds the decision log, budget file and audit chain; the root stays read-only.
-          docker run --detach --name app --read-only --tmpfs /tmp --tmpfs /app/var \
+          # It has to be a *named volume*, as in docker-compose.yml, not a tmpfs: Docker chowns a
+          # fresh named volume to the image directory's owner (10001), while a tmpfs takes that
+          # directory's mode (0750) with root ownership, so the non-root user cannot write to it.
+          docker volume create app-var
+          docker run --detach --name app --read-only --tmpfs /tmp --volume app-var:/app/var \
             --cap-drop ALL --security-opt no-new-privileges --health-interval 3s "$IMAGE"
           for _ in $(seq 1 30); do
             status="$(docker inspect --format '{{.State.Health.Status}}' app)"
             if [ "$status" = "healthy" ]; then
               test "$(docker inspect --format '{{.Config.User}}' app)" = "10001:10001"
+              # /readyz also asserts the arm catalog loaded, which the wheel does not carry.
+              docker exec app python -c 'import json, sys, urllib.request as r; d = json.load(r.urlopen("http://127.0.0.1:8000/readyz")); sys.exit(0 if d["checks"]["arm_available"] == "ok" else 1)'
               exit 0
             fi
             sleep 2
