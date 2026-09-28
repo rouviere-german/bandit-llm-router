@@ -4,7 +4,7 @@
 # src/bandit_llm_router/arms.py; anything else is refused at load time, so a typo or an
 # unreviewed model can never become a routable arm.
 #
-# Prices are USD per million tokens, taken from the Claude API reference bundled with Claude Code
+# Prices are USD per million tokens, taken from the Anthropic API documentation at docs.anthropic.com
 # (checked 2026-09). tests/unit/test_arms.py asserts they agree with
 # bandit_llm_router.agentic.pricing.PRICES_PER_MTOK, which charges the LLM budget ledger.
 #
